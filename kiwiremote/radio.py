@@ -35,6 +35,12 @@ except Exception:  # pragma: no cover
 RECONNECT_DELAY = 5.0
 BUSY_DELAY = 15.0
 SMETER_INTERVAL = 0.1
+MAX_HTTP_REDIRECTS = 5
+
+
+class KiwiRedirectLoopError(K.KiwiDownError):
+    """HTTP redirects went in a circle or never ended, e.g. proxy.kiwisdr.com and
+    proxy2.kiwisdr.com bouncing 307s between each other while the Kiwi is offline."""
 
 
 def _make_options(server, tune, compression):
@@ -58,14 +64,49 @@ def _make_options(server, tune, compression):
 class _KiwiAudioStream(K.KiwiSDRStream):
     """SND stream that pulls its tune state from the controller."""
 
-    def __init__(self, options, owner):
+    def __init__(self, options, owner, stop):
         super().__init__()
         self._options = options
         self._type = "SND"
         self._owner = owner
+        self._stop_event = stop
         self._start_time = None
         self._camp_wait_event = None
         self.rx_ready = False
+
+    # Replaces kiwiclient's version, whose redirect loop is unbounded, can't be
+    # cancelled and leaks a socket per hop.
+    def _prepare_stream(self, host, port, which):
+        self._stream_name = which
+        uri = "%s/%d/%s%s" % ("/wb" if self._options.wideband else "", self._options.ws_timestamp, which,
+                              "?camp" if self._camp_chan != -1 else "")
+        visited = []
+        while True:
+            if self._stop_event.is_set():
+                raise K.KiwiConnectionError("connection cancelled")
+            hop = "%s:%s" % (host, port)
+            if hop in visited:
+                raise KiwiRedirectLoopError("%s appears to be offline (redirect loop: %s)"
+                                            % (visited[0], " -> ".join(visited + [hop])))
+            if len(visited) > MAX_HTTP_REDIRECTS:
+                raise KiwiRedirectLoopError("Too many redirects connecting to %s" % visited[0])
+            visited.append(hop)
+            log.info("URL: %s%s", hop, uri)
+            self._socket = socket.create_connection((host, port), timeout=self._options.socket_timeout)
+            location, status_code = K.ClientHandshakeProcessor(self._socket, host, port).handshake(uri)
+            if status_code == "101":
+                break
+            self._socket.close()
+            u = urlparse(location)
+            host, port = u.hostname or host, u.port or port
+            log.warning("HTTP %s redirect to %s:%s", status_code, host, port)
+
+        request = K.ClientRequest(self._socket)
+        request.ws_version = K.VERSION_HYBI13
+        stream_option = K.StreamOptions()
+        stream_option.mask_send = True
+        stream_option.unmask_receive = False
+        self._stream = K.Stream(request, stream_option)
 
     # Called by kiwiclient when the server sends sample_rate (start of audio).
     def _setup_rx_params(self):
@@ -179,8 +220,10 @@ class RadioController:
     def connect(self, server: ServerSpec):
         self.disconnect()
         self._server = server
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="kiwi-worker", daemon=True)
+        # Fresh event per worker: a previous worker that outlived disconnect()'s
+        # join timeout must stay stopped instead of being revived by clear().
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, args=(self._stop,), name="kiwi-worker", daemon=True)
         self._thread.start()
 
     def disconnect(self, timeout=3.0):
@@ -202,19 +245,20 @@ class RadioController:
             self._connected = flag
             self._emit("connected", flag)
 
-    def _run(self):
+    def _run(self, stop):
         server = self._server
-        while not self._stop.is_set():
+        redirects = 0
+        while not stop.is_set():
             delay = RECONNECT_DELAY
             stream = None
             try:
                 self._status("Connecting to %s ..." % server.label())
                 opts = _make_options(server, self.tune, self._compression)
-                stream = _KiwiAudioStream(opts, self)
+                stream = _KiwiAudioStream(opts, self, stop)
                 self._stream = stream
                 stream.connect(server.host, server.port)
                 stream.open()
-                while not self._stop.is_set():
+                while not stop.is_set():
                     if stream.rx_ready and self._dirty:
                         with self._lock:
                             st, self._dirty = self._tune, False
@@ -227,6 +271,10 @@ class RadioController:
                 self._status("%s: all channels busy, retrying in %ds" % (server.label(), BUSY_DELAY), "error")
                 delay = BUSY_DELAY
             except K.KiwiRedirectError as e:
+                redirects += 1
+                if redirects > MAX_HTTP_REDIRECTS:
+                    self._status("%s: too many redirects, giving up" % self._server.label(), "error")
+                    break
                 u = urlparse(str(e))
                 if u.hostname:
                     server = ServerSpec(u.hostname, u.port or server.port, server.password, server.user)
@@ -238,24 +286,27 @@ class RadioController:
                 break
             except (K.KiwiServerTerminatedConnection, ConnectionTerminatedException,
                     K.KiwiConnectionError, OSError) as e:
-                if self._stop.is_set():
+                if stop.is_set():
                     break
                 self._status("Connection lost (%s); reconnecting in %ds" % (e or type(e).__name__,
                                                                             RECONNECT_DELAY), "error")
             except Exception as e:
-                if self._stop.is_set():
+                if stop.is_set():
                     break
                 log.exception("worker error")
                 self._status("Error: %s; reconnecting in %ds" % (e, RECONNECT_DELAY), "error")
             finally:
-                self._stream = None
+                if self._stream is stream:
+                    self._stream = None
+                if stream is not None and stream.rx_ready:
+                    redirects = 0
                 self._set_connected(False)
                 if stream is not None:
                     try:
                         stream.close()
                     except Exception:
                         pass
-            self._stop.wait(delay)
+            stop.wait(delay)
         self._set_connected(False)
         self._status("Disconnected")
         self._emit("stopped")

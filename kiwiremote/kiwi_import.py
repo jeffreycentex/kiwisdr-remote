@@ -51,3 +51,6 @@ from kiwi.client import (  # noqa: E402
     KiwiConnectionError,
     KiwiServerTerminatedConnection,
 )
+from kiwi.wsclient import ClientHandshakeProcessor, ClientRequest  # noqa: E402
+from mod_pywebsocket.common import VERSION_HYBI13  # noqa: E402
+from mod_pywebsocket.stream import Stream, StreamOptions  # noqa: E402

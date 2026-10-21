@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import wave
@@ -211,6 +212,42 @@ class TestEndToEnd(unittest.TestCase):
         finally:
             ctl.shutdown()
             kiwi.stop()
+
+    def test_redirect_loop_stops(self):
+        # Two "proxies" that 307 to each other, like proxy/proxy2.kiwisdr.com
+        # when the Kiwi behind them is down.
+        socks = [socket.socket() for _ in range(2)]
+        for s in socks:
+            s.bind(("127.0.0.1", 0))
+            s.listen(16)
+        ports = [s.getsockname()[1] for s in socks]
+        hits = [0, 0]
+
+        def serve(i):
+            while True:
+                try:
+                    c, _ = socks[i].accept()
+                except OSError:
+                    return
+                hits[i] += 1
+                c.recv(4096)
+                c.sendall(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:%d/\r\n\r\n"
+                          % ports[1 - i])
+                c.close()
+
+        for i in range(2):
+            threading.Thread(target=serve, args=(i,), daemon=True).start()
+        events = []
+        ctl = RadioController(on_event=lambda k, p: events.append((k, p)))
+        try:
+            ctl.connect(ServerSpec("127.0.0.1", ports[0]))
+            self.assertTrue(wait_for(lambda: any(k == "stopped" for k, p in events)))
+            self.assertTrue(any(k == "status" and "redirect loop" in p[0] for k, p in events))
+            self.assertLessEqual(sum(hits), 3)
+        finally:
+            ctl.shutdown()
+            for s in socks:
+                s.close()
 
 
 if __name__ == "__main__":
