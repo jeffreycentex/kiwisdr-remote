@@ -1,0 +1,8 @@
+# Required
+PySide6>=6.6
+numpy>=1.24
+sounddevice>=0.4.6        # PortAudio wheels included on Windows/macOS; Linux needs libportaudio2
+
+# Recommended
+samplerate>=0.2.1         # libsamplerate: high-quality resampling to the sound card rate
+av>=12.0                  # PyAV (bundled FFmpeg): needed only for M4A/MP4 recording
