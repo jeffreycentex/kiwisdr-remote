@@ -103,6 +103,20 @@ class TestRigctld(unittest.TestCase):
         self.assertEqual(self.ask("+f", 3), ["get_freq:", "Frequency: 7074000", "RPRT 0"])
         self.assertEqual(self.ask("\\get_freq"), ["7074000"])
 
+    def test_vfo_mode_client(self):
+        # fldigi / hamlib in VFO mode put a VFO before every command's args (issue #3)
+        self.assertEqual(self.ask("f VFOA"), ["7074000"])
+        self.assertEqual(self.ask("m VFOA", 2), ["USB", "2800"])
+        self.assertEqual(self.ask("t VFOA"), ["0"])
+        self.assertEqual(self.ask("l VFOA STRENGTH"), ["-54"])
+        self.assertEqual(self.ask("M VFOA LSB -1"), ["RPRT 0"])
+        self.assertEqual(self.ask("\\get_freq VFOA"), ["7074000"])
+        self.assertEqual(self.ask("\\set_freq currVFO 7075000"), ["RPRT 0"])
+        self.assertEqual(self.ask("\\get_level Main STRENGTH"), ["-54"])
+        self.assertEqual(self.ask("V VFOA"), ["RPRT 0"])
+        self.assertEqual(self.ask("f VFOA m VFOA", 3), ["7075000", "LSB", "2800"])
+        self.assertEqual(self.ctl.tune.mode, "LSB")
+
     def test_dump_state_and_misc(self):
         self.f.write(b"\\dump_state\n")
         self.f.flush()

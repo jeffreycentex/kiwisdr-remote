@@ -14,6 +14,7 @@ Supported commands (short and long forms, plain and '+' extended responses):
   l get_level <LEVEL>   STRENGTH returns S-meter in dB relative to S9
   L set_level           accepted, ignored
   \\dump_state  \\chk_vfo  \\get_powerstat  \\get_lock_mode  q/Q
+A leading VFO argument ('f VFOA', 'l VFOA STRENGTH') is accepted and ignored.
 Anything else -> RPRT -11 (feature not available) and a log line.
 """
 
@@ -41,6 +42,15 @@ SHORT = {v: k for k, v in LONG.items()}
 
 # hamlib mode bit flags (rig.h): AM=0x1 CW=0x2 USB=0x4 LSB=0x8
 MODE_BITS = "0xd"
+
+# hamlib VFO names (rig_strvfo). Clients in VFO mode (fldigi, hamlib >= 4)
+# put one in front of the arguments of most commands: 'f VFOA', 'l VFOA STRENGTH'.
+VFO_NAMES = {"VFOA", "VFOB", "VFOC", "CURRVFO", "VFO", "MEM", "MAIN", "SUB", "TX", "RX",
+             "MAINA", "MAINB", "MAINC", "SUBA", "SUBB", "SUBC", "NONE"}
+
+
+def _is_vfo(tok):
+    return tok.upper() in VFO_NAMES
 
 
 def _dump_state(max_hz):
@@ -168,6 +178,8 @@ class RigctldServer:
             if long_name == "quit":
                 close = True
                 break
+            if long_name != "set_vfo" and args and _is_vfo(args[0]):
+                args = args[1:]           # single VFO: the target VFO doesn't matter
             try:
                 values, rc = self._dispatch(long_name, args)
             except Exception as e:
@@ -200,11 +212,11 @@ class RigctldServer:
             tok = tokens[i]
             if len(tok) == 1 and tok in LONG:
                 n = nargs.get(tok, 0)
+                # a leading VFO argument ('F VFOA 7074000', 'f VFOA') belongs to the
+                # command; for 'V' the VFO is the argument itself
+                if tok != "V" and i + 1 < len(tokens) and _is_vfo(tokens[i + 1]):
+                    n += 1
                 args = tokens[i + 1:i + 1 + n]
-                # tolerate a leading VFO argument: 'F VFOA 7074000'
-                if args and args[0].upper().startswith(("VFO", "MAIN", "SUB", "CURR")) and tok in "FMTSL":
-                    args = tokens[i + 2:i + 2 + n]
-                    i += 1
                 cmds.append((tok, args))
                 i += 1 + len(args)
             else:
@@ -217,7 +229,6 @@ class RigctldServer:
         if cmd == "get_freq":
             return [("Frequency", "%d" % c.tune.freq_hz)], 0
         if cmd == "set_freq":
-            args = [a for a in args if not a.upper().startswith("VFO")]
             hz = float(args[0])
             c.set_frequency(hz, source="rigctl")
             self._on_activity("command", "F %.0f" % hz)
@@ -226,7 +237,6 @@ class RigctldServer:
             st = c.tune
             return [("Mode", st.mode), ("Passband", "%d" % st.passband)], 0
         if cmd == "set_mode":
-            args = [a for a in args if not a.upper().startswith("VFO")]
             mode = args[0]
             pb = int(float(args[1])) if len(args) > 1 else 0
             if pb < 0:                    # RIG_PASSBAND_NOCHANGE

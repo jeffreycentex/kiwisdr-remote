@@ -64,6 +64,13 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_record_box())
         root.addWidget(self._build_rigctl_box())
         root.addStretch(1)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        exit_btn = QPushButton("Exit")
+        exit_btn.setToolTip("Disconnect, stop recording and close the application")
+        exit_btn.clicked.connect(self.close)    # closeEvent saves settings and shuts down
+        bottom.addWidget(exit_btn)
+        root.addLayout(bottom)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
 
