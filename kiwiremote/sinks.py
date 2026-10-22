@@ -10,6 +10,7 @@ WavSink         -> 16-bit PCM WAV at the Kiwi's native rate
 M4aSink         -> AAC in an MP4 container (.m4a / .mp4) via PyAV (optional dependency)
 """
 
+import collections
 import logging
 import os
 import shutil
@@ -218,14 +219,26 @@ class SoundCardSink:
 
     # Loop tuning. Fill error e = (fill - target)/target drives
     #   trim = 1 - KP*e - I,   dI/dt = KI*e
-    # giving natural frequency ~0.01 rad/s and damping ~0.7: it settles in a
+    # giving natural frequency ~0.012 rad/s and damping ~0.85: it settles in a
     # few minutes and network jitter moves the pitch by well under 0.1 %
     # (about 1 Hz at a 1500 Hz FT8 tone).
-    TARGET_LATENCY = 0.20   # seconds of audio kept in the ring buffer
+    TARGET_LATENCY = 0.20   # seconds left in the ring when an on-time packet arrives
     KP = 0.003
     KI = 2e-5               # per second
-    FILL_TAU = 2.0          # seconds, smoothing of the measured fill level
+    FILL_TAU = 5.0          # seconds, smoothing of the measured fill level
+    INTEG_BAND = 0.3        # integrate only while |e| is below this
+    LATE_WINDOW = 20.0      # seconds; earliest packet in this window = 'on time'
+    LATE_RESET = 2.0        # a packet this late starts a new timeline
     TRIM_LIMIT = 0.005
+    # The callback runs Python, so it must not be scheduled every 1-2 ms:
+    # 'latency="low"' gives 64-frame buffers (1.3 ms on BlackHole), any GIL
+    # stall then drops device IO cycles, the ring overfills and the trim
+    # winds up to its limit. ~20 ms blocks with 100 ms of device latency
+    # leave plenty of slack.
+    BLOCK_SECONDS = 0.02
+    DEVICE_LATENCY = 0.10
+    FADE_SECONDS = 0.005    # ramp at underrun / resume, avoids clicks
+    LIMIT_KNEE = 0.9        # soft limiter above this level (gain > 100 %)
 
     def __init__(self, device_key, gain=1.0):
         if not HAVE_SOUNDDEVICE:
@@ -240,6 +253,9 @@ class SoundCardSink:
         self._primed = False
         self._fill_ema = 0.0
         self._integ = 0.0
+        self._t_in = 0.0                 # Kiwi stream position, seconds
+        self._late_min = collections.deque()
+        self._clock = time.monotonic     # replaceable for simulated-time tests
         self.underruns = 0
 
     # -- worker-thread side --------------------------------------------------
@@ -267,37 +283,93 @@ class SoundCardSink:
         self._primed = False
         self._fill_ema = 0.0
         self._integ = 0.0
+        self._t_in = 0.0
+        self._late_min.clear()
+        self._fade = np.linspace(0.0, 1.0, max(2, int(out_rate * self.FADE_SECONDS)),
+                                 dtype=np.float32)
+        self._fade_in = True
         self._stream = sd.OutputStream(
             device=idx, samplerate=out_rate, channels=channels, dtype="float32",
-            latency="low", callback=self._callback)
+            blocksize=int(out_rate * self.BLOCK_SECONDS),
+            latency=max(self.DEVICE_LATENCY, float(info.get("default_high_output_latency", 0.0))),
+            callback=self._callback)
         self._stream.start()
-        log.info("sound card '%s' opened at %d Hz, %d ch, resampler=%s",
-                 info["name"], out_rate, channels, self._resampler.backend)
+        log.info("sound card '%s' opened at %d Hz, %d ch, block %d, latency %.0f ms, resampler=%s",
+                 info["name"], out_rate, channels, self._stream.blocksize,
+                 1000.0 * self._stream.latency, self._resampler.backend)
 
     def write(self, samples):
         if self._stream is None:
             return
         x = samples.astype(np.float32) * (self.gain / 32768.0)
-        target = self.TARGET_LATENCY * self._out_rate
+        rate = self._out_rate
+        target = self.TARGET_LATENCY * rate
         dt = len(samples) / self._resampler.in_rate
-        fill = len(self._ring)
-        if self._primed:
-            a = min(1.0, dt / self.FILL_TAU)
-            self._fill_ema += a * (fill - self._fill_ema)
-        else:
-            self._fill_ema = fill
+        fill = len(self._ring)               # trough: just before the refill
+        if fill > 4 * target:                # way behind (e.g. device stalled) - catch up
+            self._ring.discard_to(int(target))
+            fill = len(self._ring)
+        # Kiwi packets carry up to 170 ms (2048 samples when compressed) and
+        # arrive with network jitter, so the raw trough jumps around by the
+        # packet's lateness. Correct for it: lateness = arrival time minus the
+        # packet's place in the Kiwi sample stream, relative to the earliest
+        # packet of the last few seconds. 'level' is then the trough an
+        # on-time packet would see: jitter drops out, clock drift does not.
+        late = self._lateness(dt)
+        level = fill + late * rate
+        if not self._primed:
+            # (Re)start so that the next on-time packet finds exactly 'target'
+            # left: the loop starts with zero error. After a stall the late
+            # packets arrive in a bunch; their backlog is dropped here (silence
+            # already took its place) instead of being a step that the loop
+            # must drain, which wound up the integrator and cascaded (issue #6).
+            y = self._limit(self._resampler.process(x, 1.0 - self._integ))
+            self._ring.push(y)
+            if level >= target:
+                keep = int(target + len(y) - late * rate)
+                if keep > 0:
+                    self._ring.discard_to(keep)
+                    self._fill_ema = target
+                    self._primed = True
+                else:
+                    self._ring.clear()
+            return
+        a = min(1.0, dt / self.FILL_TAU)
+        self._fill_ema += a * (level - self._fill_ema)
         err = (self._fill_ema - target) / target
-        if self._primed:
+        # Only clock drift belongs in the integrator, and drift moves the level
+        # slowly; the proportional term handles anything sudden.
+        if abs(err) < self.INTEG_BAND:
             self._integ = float(np.clip(self._integ + self.KI * err * dt,
                                         -self.TRIM_LIMIT, self.TRIM_LIMIT))
         trim = float(np.clip(1.0 - self.KP * err - self._integ,
                              1.0 - 2 * self.TRIM_LIMIT, 1.0 + 2 * self.TRIM_LIMIT))
-        y = self._resampler.process(x, trim)
-        self._ring.push(y)
-        if len(self._ring) > 4 * target:     # way behind (e.g. device stalled) - catch up
-            self._ring.discard_to(int(target))
-        if not self._primed and len(self._ring) >= target:
-            self._primed = True
+        self._ring.push(self._limit(self._resampler.process(x, trim)))
+
+    def _lateness(self, dt):
+        """Seconds this packet is later than the earliest one in LATE_WINDOW."""
+        now = self._clock()
+        late = now - self._t_in
+        self._t_in += dt
+        q = self._late_min                  # (time, lateness), lateness increasing
+        if q and late - q[0][1] > self.LATE_RESET:
+            q.clear()                       # long gap (reconnect, sleep): new timeline
+        while q and q[-1][1] >= late:
+            q.pop()
+        q.append((now, late))
+        while q[0][0] < now - self.LATE_WINDOW:
+            q.popleft()
+        return late - q[0][1]
+
+    def _limit(self, y):
+        """Soft knee instead of hard clipping at full scale (gain > 100 %, sinc overshoot)."""
+        a = np.abs(y)
+        over = a > self.LIMIT_KNEE
+        if over.any():
+            head = 1.0 - self.LIMIT_KNEE
+            y = y.copy()
+            y[over] = np.sign(y[over]) * (self.LIMIT_KNEE + head * np.tanh((a[over] - self.LIMIT_KNEE) / head))
+        return y
 
     def close(self):
         self._close_stream()
@@ -314,9 +386,16 @@ class SoundCardSink:
         mono = np.zeros(frames, dtype=np.float32)
         if self._primed:
             got = self._ring.pull(mono)
+            if self._fade_in:
+                n = min(got, len(self._fade))
+                mono[:n] *= self._fade[:n]
+                self._fade_in = False
             if got < frames:
                 self.underruns += 1
+                n = min(got, len(self._fade))
+                mono[got - n:got] *= self._fade[::-1][len(self._fade) - n:]
                 self._primed = False     # re-prime before resuming, avoids stutter
+                self._fade_in = True
         outdata[:] = mono[:, None] if self._channels > 1 else mono.reshape(-1, 1)
 
     def _close_stream(self):

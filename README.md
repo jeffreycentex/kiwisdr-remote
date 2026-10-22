@@ -107,13 +107,16 @@ Supported commands:
 - `l STRENGTH`: S-meter in dB relative to S9
 - `\dump_state`, `\chk_vfo`, `\get_powerstat`
 - `+` extended responses
+- A leading VFO argument (`f VFOA`, `l VFOA STRENGTH`, `\set_freq currVFO 7074000`), as sent by fldigi and other VFO-mode clients, is accepted and ignored.
 
 Mode mapping: `PKTUSB`/`USBD` map to USB, `PKTLSB` to LSB, `SAM`/`AMS` to AM. Other modes return `RPRT -11`. Changes made through rigctl update the GUI immediately and are applied to the Kiwi whether or not it is connected at that moment.
 
 ## Behaviour notes
 
 - **Passband.** SSB uses a 200 Hz low edge plus the bandwidth (default 2800 Hz, giving 200–3000 Hz). AM is symmetric (default ±4900 Hz). A rigctl passband of 0 means the mode's default.
-- **Clock drift.** The Kiwi's sample clock and your sound card's clock differ by tens to hundreds of ppm. A PI controller holds the output buffer at 200 ms by trimming the resampling ratio, by at most ±0.5 %. The trim settles to the true clock offset within a few minutes. Network jitter moves the pitch by much less than 0.1 %, about 1 Hz at a 1500 Hz FT8 tone. The current trim and buffer level are shown under the device selector.
+- **Clock drift.** The Kiwi's sample clock and your sound card's clock differ by tens to hundreds of ppm. A PI controller holds the output buffer at 200 ms (measured when an on-time packet arrives) by trimming the resampling ratio, by at most ±0.5 %. The trim settles to the true clock offset within a few minutes. Network jitter moves the pitch by much less than 0.1 %, about 1 Hz at a 1500 Hz FT8 tone. The current trim and buffer level are shown under the device selector.
+- **Output blocks.** The device is opened with ~20 ms callback blocks and ~100 ms of device latency. Smaller blocks (e.g. BlackHole's 1.3 ms minimum) cannot be served reliably from Python. Gaps after an underrun are faded in and out, and gain above 100 % goes through a soft limiter instead of hard clipping.
+- **Network jitter.** Kiwi packets carry up to 170 ms of audio and arrive with jitter. The buffer level is corrected by each packet's lateness, so jitter doesn't disturb the trim. After a network stall, the late backlog is dropped when playback resumes, so the stall can't wind up the trim.
 - **Reconnects.** If the connection drops, the app reconnects after 5 s. If all channels are busy, it retries every 15 s. A bad password stops retrying.
 - **Frequency range** is taken from the server after connecting. This also covers Kiwis with a configured frequency offset (transverter or LF setups). An out-of-range request is clamped and reported.
 - **Compressed audio (ADPCM)** is on by default, as in the Kiwi web UI. Turning it off uses about 4× the bandwidth (192 kbit/s) but is lossless. The setting applies on the next connect.
