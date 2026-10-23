@@ -1,6 +1,6 @@
 # KiwiSDR Remote
 
-A cross-platform (Windows / macOS / Linux) desktop application for a remote KiwiSDR:
+A cross-platform (Windows / macOS / Linux) desktop application for a remote KiwiSDR operation and control.  This is ideal to pass audio data into FLDigi or WSJTX for non amateur radio operators.  
 
 - Choose the server, frequency, mode (USB / LSB / AM) and bandwidth.
 - Send the audio to any output device. That includes a virtual audio cable, so WSJT-X, fldigi and similar programs can decode it.
@@ -8,6 +8,10 @@ A cross-platform (Windows / macOS / Linux) desktop application for a remote Kiwi
 - Built-in **hamlib rigctld server** (NET rigctl, model 2). External programs can read and set the frequency and mode, and the GUI follows those changes.
 
 It uses [jks-prv/kiwiclient](https://github.com/jks-prv/kiwiclient) for the KiwiSDR websocket protocol.
+
+Tested on:
+- Mac OSX Golden Gate using BlackHole
+- Windows 11 26H2 and VB Virtual Audio Cable
 
 ```
              ┌──────────────── KiwiSDR Remote ─────────────────┐
@@ -31,6 +35,7 @@ python -m venv .venv
 pip install -r requirements.txt
 python run_kiwiremote.py             # add --debug for protocol/rigctl logging
 ```
+Windows only:  Edit the requirements.txt file and remove samplerate as this needs a full build environment.  Everything else works OK.
 
 Linux only: PortAudio is also required: `sudo apt install libportaudio2` (Debian/Ubuntu) or `sudo dnf install portaudio` (Fedora).
 
