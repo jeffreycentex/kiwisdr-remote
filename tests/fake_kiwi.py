@@ -93,10 +93,11 @@ class AdpcmEncoder:
 
 
 class FakeKiwi:
-    def __init__(self, sample_rate=12001.135, bandwidth_hz=30_000_000, busy=False):
+    def __init__(self, sample_rate=12001.135, bandwidth_hz=30_000_000, busy=False, password=None):
         self.sample_rate = sample_rate
         self.bandwidth_hz = bandwidth_hz
         self.busy = busy
+        self.password = password     # if set, 'SET auth' must carry it (else badp=1)
         self.commands = []
         self.connections = 0
         self._srv = socket.socket()
@@ -148,6 +149,16 @@ class FakeKiwi:
             state = {"compress": True}
             threading.Thread(target=self._reader, args=(c, state), daemon=True).start()
             send = lambda s: c.sendall(_frame(b"MSG\0" + s.encode()))
+            if self.password is not None:
+                end = time.time() + 3
+                while time.time() < end and not any(x.startswith("SET auth") for x in self.commands[-5:]):
+                    time.sleep(0.01)
+                auth = [x for x in self.commands if x.startswith("SET auth")][-1:]
+                if not auth or (" p=%s" % self.password) not in auth[0]:
+                    send("badp=1")
+                    time.sleep(0.5)
+                    return
+                send("badp=0")
             if self.busy:
                 send("too_busy=4")
                 time.sleep(0.5)

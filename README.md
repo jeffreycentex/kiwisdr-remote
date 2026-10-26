@@ -7,6 +7,9 @@ A cross-platform (Windows / macOS / Linux) desktop application for a remote Kiwi
 - Record to **WAV** (16-bit PCM at the Kiwi's native ~12 kHz) or **M4A/MP4** (AAC).
 - Built-in **hamlib rigctld server** (NET rigctl, model 2). External programs can read and set the frequency and mode, and the GUI follows those changes.
 
+- **Remote-control API** (HTTP/JSON on localhost) for schedulers and scripts. Through it, a program can connect to a server with a password, tune, start and stop WAV recordings, and disconnect. A **headless mode** runs the API, rigctld and recording without a window. Both are described in [docs/API.md](docs/API.md).
+- **Session limits** that keep public Kiwi operators happy: 2 h with a password, 45 min without, and a reconnect every 2 h. Kiwis on your own LAN are exempt.
+
 It uses [jks-prv/kiwiclient](https://github.com/jks-prv/kiwiclient) for the KiwiSDR websocket protocol.
 
 Tested on:
@@ -134,6 +137,23 @@ Supported commands:
 
 Mode mapping: `PKTUSB`/`USBD` map to USB, `PKTLSB` to LSB, `SAM`/`AMS` to AM. Other modes return `RPRT -11`. Changes made through rigctl update the GUI immediately and are applied to the Kiwi whether or not it is connected at that moment.
 
+## Remote-control API and headless mode
+
+The API is turned on in the GUI under *Remote control API and session limits*, and is always on in headless mode. It listens only on `127.0.0.1:7373`:
+
+```bash
+python run_kiwiremote.py ctl connect kiwi.example.net:8073 --password secret --wait 10
+python run_kiwiremote.py ctl record-start --name "{date}_texas_net" --max-seconds 5400
+python run_kiwiremote.py ctl record-stop
+python run_kiwiremote.py ctl disconnect
+
+python run_kiwiremote.py --headless --record-dir ~/net-recordings     # no window, no Qt needed
+```
+
+The GUI shows every change the API makes. If the recording drops out during a reconnect, silence is inserted for the gap, so a position in the WAV file still matches the clock time.
+
+When fldigi's rig control points at the rigctld here, a scheduler that tunes fldigi also tunes the Kiwi. The API then only has to choose the server and handle recording. The full reference, covering endpoints, errors, the session policy and the security model, is in **[docs/API.md](docs/API.md)**.
+
 ## Behaviour notes
 
 - **Passband.** SSB uses a 200 Hz low edge plus the bandwidth (default 2800 Hz, giving 200–3000 Hz). AM is symmetric (default ±4900 Hz). A rigctl passband of 0 means the mode's default.
@@ -159,10 +179,18 @@ The tests are headless and need no audio hardware or real Kiwi. They cover:
 - The rigctld protocol: short, long and extended forms, `dump_state`, multiple commands per line, and VFO arguments.
 - The resampler's continuity and length accuracy.
 - A simulated-time run of the drift controller with sound-card clocks at ±300 ppm.
+- The service and API (`tests/test_api.py`): the session limit, periodic reset and local exemption, run on a simulated clock; gap filling; recording names; HTTP status and error codes; the token, `Host`-header and content-type protections; the `ctl` client; and headless mode shutting down cleanly on a signal with a finalized WAV.
+
+GitHub Actions runs these tests on Linux, Windows and macOS for every push and pull request (`.github/workflows/ci.yml`).
 
 ## Building standalone apps
 
-Build on each target OS; PyInstaller does not cross-compile.
+**GitHub Actions** (`.github/workflows/build.yml`) builds Windows x64, macOS (Apple silicon) and Linux x64 archives:
+
+- **On demand:** Actions → *Build* → *Run workflow*. The archives appear as artifacts on the run.
+- **Release:** push a tag such as `v0.2.0` (`git tag v0.2.0 && git push origin v0.2.0`). A GitHub release is created with the archives attached.
+
+To build locally, run this on each target OS (PyInstaller does not cross-compile):
 
 ```bash
 pip install pyinstaller
@@ -170,7 +198,12 @@ python fetch_kiwiclient.py
 pyinstaller kiwiremote.spec
 ```
 
-The output is `dist/KiwiSDR Remote/KiwiSDR Remote.exe` on Windows, `dist/KiwiSDR Remote.app` on macOS (unsigned, so right-click → Open the first time), and `dist/KiwiSDR Remote/KiwiSDR Remote` on Linux.
+Each build contains two programs:
+
+- `KiwiSDR Remote`: the GUI. `KiwiSDR Remote.exe` on Windows; `KiwiSDR Remote.app` on macOS, which is unsigned, so right-click → Open the first time.
+- `kiwiremote-cli`: a console program for `--headless` and `ctl`. Windows GUI programs have no console, so this is the one to use for those modes there.
+
+On Linux, the target machine also needs `libportaudio2`, plus the usual Qt runtime libraries for the GUI.
 
 ## Licensing
 
@@ -184,7 +217,11 @@ KiwiSDR Remote is free software, licensed under the **GNU General Public License
 run_kiwiremote.py        launcher / PyInstaller entry
 fetch_kiwiclient.py      downloads kiwiclient into third_party/
 kiwiremote/
-  gui.py                 PySide6 main window
+  gui.py                 PySide6 main window (drives service.py)
+  service.py             Qt-free service: connect/tune/record, session policy, timers
+  api.py                 HTTP/JSON API (/api/v1), localhost + token + browser protections
+  ctl.py                 'ctl' command-line client and ApiClient for other programs
+  headless.py            --headless entry: service + API + rigctld, no Qt
   radio.py               connection worker, controller API, reconnect logic
   rigctld.py             hamlib NET rigctl server
   sinks.py               sound-card (drift-locked), WAV and M4A/MP4 outputs
@@ -192,4 +229,7 @@ kiwiremote/
   state.py               tune/server models, mode and passband rules
   kiwi_import.py         locates kiwiclient
 tests/                   fake Kiwi server + unit/integration tests
+docs/API.md              API reference
+.github/workflows/       CI tests and PyInstaller builds
+CLAUDE.md                notes for Claude / contributors
 ```

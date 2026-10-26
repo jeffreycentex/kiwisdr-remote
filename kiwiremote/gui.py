@@ -1,4 +1,6 @@
-"""PySide6 main window."""
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""PySide6 main window. All actions go through KiwiService, so changes made by
+the HTTP API or rigctld show up here (via events) exactly like local ones."""
 
 import logging
 import os
@@ -15,8 +17,9 @@ from PySide6.QtWidgets import (
     QStatusBar, QVBoxLayout, QWidget)
 
 from . import __version__
-from .radio import RadioController
+from .api import DEFAULT_PORT as API_DEFAULT_PORT, ApiServer
 from .rigctld import RigctldServer
+from .service import ApiError, KiwiService, SessionPolicy, default_record_dir
 from .sinks import (HAVE_PYAV, HAVE_SOUNDDEVICE, PULSE_PREFIX, create_virtual_cable,
                     default_recording_name, guess_virtual_cable, list_output_devices,
                     sounddevice_error)
@@ -51,9 +54,12 @@ class MainWindow(QMainWindow):
         self.bridge = _Bridge()
         self.bridge.event.connect(self._on_event, Qt.QueuedConnection)
         emit = self.bridge.event.emit
-        self.radio = RadioController(on_event=emit,
-                                     compression=self.settings.value("compression", True, type=bool))
+        self.service = KiwiService(on_event=emit,
+                                   policy=self._load_policy(),
+                                   compression=self.settings.value("compression", True, type=bool))
+        self.radio = self.service.radio
         self.rigctld = None
+        self.api = None
         self._rec_started = None
 
         central = QWidget()
@@ -63,6 +69,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_audio_box())
         root.addWidget(self._build_record_box())
         root.addWidget(self._build_rigctl_box())
+        root.addWidget(self._build_api_box())
         root.addStretch(1)
         bottom = QHBoxLayout()
         bottom.addStretch(1)
@@ -83,6 +90,8 @@ class MainWindow(QMainWindow):
             self.audio_enable.setToolTip("PortAudio not available: %s" % sounddevice_error())
         if self.rig_enable.isChecked():
             self._toggle_rigctld(True)
+        if self.api_enable.isChecked():
+            self._toggle_api(True)
 
     # ================================================================== layout
     def _build_server_box(self):
@@ -101,6 +110,8 @@ class MainWindow(QMainWindow):
         find_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(PUBLIC_LIST_URL)))
         self.compression = QCheckBox("Compressed audio (ADPCM, ~1/4 the bandwidth)")
         self.conn_label = QLabel("Disconnected")
+        self.session_label = QLabel("")
+        self.session_label.setStyleSheet("color: gray")
         self.smeter = QProgressBar(minimum=-127, maximum=-13, textVisible=True)
         self.smeter.setFormat("—")
         self.smeter.setValue(-127)
@@ -115,7 +126,8 @@ class MainWindow(QMainWindow):
         g.addWidget(self.user_name, 2, 1)
         g.addWidget(self.compression, 3, 1, 1, 3)
         g.addWidget(self.conn_label, 4, 0, 1, 3)
-        g.addWidget(self.smeter, 5, 0, 1, 4)
+        g.addWidget(self.session_label, 5, 0, 1, 4)
+        g.addWidget(self.smeter, 6, 0, 1, 4)
         g.setColumnStretch(1, 1)
         return box
 
@@ -210,6 +222,8 @@ class MainWindow(QMainWindow):
                 item.setEnabled(False)
                 item.setToolTip("Install PyAV:  pip install av")
         self.rec_dir = QLineEdit()
+        self.rec_dir.setToolTip("Also the default folder for recordings started through the API")
+        self.rec_dir.editingFinished.connect(self._rec_dir_changed)
         browse = QPushButton("Folder…")
         browse.clicked.connect(self._choose_dir)
         self.rec_btn = QPushButton("● Record")
@@ -249,7 +263,55 @@ class MainWindow(QMainWindow):
         g.addWidget(hint, 2, 0, 1, 5)
         return box
 
+    def _build_api_box(self):
+        box = QGroupBox("Remote control API and session limits")
+        g = QGridLayout(box)
+        self.api_enable = QCheckBox("API on 127.0.0.1, port")
+        self.api_enable.setToolTip("HTTP/JSON API for schedulers and scripts; see docs/API.md")
+        self.api_enable.toggled.connect(self._toggle_api)
+        self.api_port = QSpinBox(minimum=1, maximum=65535, value=API_DEFAULT_PORT)
+        self.api_token = QLineEdit(echoMode=QLineEdit.Password, placeholderText="token (optional)")
+        self.api_status = QLabel("Off")
+        g.addWidget(self.api_enable, 0, 0, 1, 2)
+        g.addWidget(self.api_port, 0, 2)
+        g.addWidget(self.api_token, 0, 3, 1, 3)
+        g.addWidget(self.api_status, 1, 0, 1, 6)
+
+        def minutes(tip):
+            w = QSpinBox(minimum=0, maximum=24 * 60, singleStep=15, suffix=" min")
+            w.setSpecialValueText("off")
+            w.setToolTip(tip)
+            w.valueChanged.connect(self._policy_changed)
+            return w
+        self.lim_pw = minutes("Session limit when a password is used (0 = off)")
+        self.lim_pub = minutes("Session limit without a password (0 = off)")
+        self.reset_min = minutes("Disconnect and reconnect after this much connected time (0 = off)")
+        self.reset_pause = QSpinBox(minimum=1, maximum=300, suffix=" s")
+        self.reset_pause.setToolTip("How long a periodic reset stays disconnected")
+        self.reset_pause.valueChanged.connect(self._policy_changed)
+        self.exempt_local = QCheckBox("No limits or resets for Kiwis on this computer / LAN")
+        self.exempt_local.toggled.connect(self._policy_changed)
+        g.addWidget(QLabel("Limit with password"), 2, 0)
+        g.addWidget(self.lim_pw, 2, 1)
+        g.addWidget(QLabel("without"), 2, 2)
+        g.addWidget(self.lim_pub, 2, 3)
+        g.addWidget(QLabel("Reset every"), 3, 0)
+        g.addWidget(self.reset_min, 3, 1)
+        g.addWidget(QLabel("pause"), 3, 2)
+        g.addWidget(self.reset_pause, 3, 3)
+        g.addWidget(self.exempt_local, 4, 0, 1, 6)
+        return box
+
     # ================================================================== settings
+    def _load_policy(self):
+        s, d = self.settings, SessionPolicy()
+        return SessionPolicy(
+            s.value("limit_password_min", d.limit_with_password_min, type=float),
+            s.value("limit_public_min", d.limit_without_password_min, type=float),
+            s.value("reset_interval_min", d.reset_interval_min, type=float),
+            s.value("reset_pause_s", d.reset_pause_s, type=float),
+            s.value("exempt_local", d.exempt_local, type=bool))
+
     def _load_settings(self):
         s = self.settings
         hist = s.value("server_history", [], type=list) or []
@@ -270,8 +332,22 @@ class MainWindow(QMainWindow):
         self.volume.setValue(s.value("volume", 100, type=int))
         i = self.rec_format.findData(s.value("rec_format", ".wav"))
         self.rec_format.setCurrentIndex(i if i >= 0 and self.rec_format.model().item(i).isEnabled() else 0)
-        default_dir = os.path.join(os.path.expanduser("~"), "Music", "KiwiSDR")
-        self.rec_dir.setText(s.value("rec_dir", default_dir))
+        self.rec_dir.setText(s.value("rec_dir", default_record_dir()))
+        self._rec_dir_changed()
+        pol = self.service.policy
+        for w, v in ((self.lim_pw, pol.limit_with_password_min), (self.lim_pub, pol.limit_without_password_min),
+                     (self.reset_min, pol.reset_interval_min), (self.reset_pause, pol.reset_pause_s)):
+            w.blockSignals(True)
+            w.setValue(int(v))
+            w.blockSignals(False)
+        self.exempt_local.blockSignals(True)
+        self.exempt_local.setChecked(pol.exempt_local)
+        self.exempt_local.blockSignals(False)
+        self.api_port.setValue(s.value("api_port", API_DEFAULT_PORT, type=int))
+        self.api_token.setText(s.value("api_token", ""))
+        self.api_enable.blockSignals(True)
+        self.api_enable.setChecked(s.value("api_enable", False, type=bool))
+        self.api_enable.blockSignals(False)
         self.rig_addr.setCurrentText(s.value("rig_addr", "127.0.0.1"))
         self.rig_port.setValue(s.value("rig_port", 4532, type=int))
         self.rig_enable.blockSignals(True)
@@ -303,12 +379,21 @@ class MainWindow(QMainWindow):
         s.setValue("rig_enable", self.rig_enable.isChecked())
         s.setValue("rig_addr", self.rig_addr.currentText())
         s.setValue("rig_port", self.rig_port.value())
+        pol = self.service.policy
+        s.setValue("limit_password_min", pol.limit_with_password_min)
+        s.setValue("limit_public_min", pol.limit_without_password_min)
+        s.setValue("reset_interval_min", pol.reset_interval_min)
+        s.setValue("reset_pause_s", pol.reset_pause_s)
+        s.setValue("exempt_local", pol.exempt_local)
+        s.setValue("api_enable", self.api_enable.isChecked())
+        s.setValue("api_port", self.api_port.value())
+        s.setValue("api_token", self.api_token.text())
         s.setValue("geometry", self.saveGeometry())
 
     # ================================================================== server
     def _connect_clicked(self, *_):
-        if self.radio.connected or self.connect_btn.text() == "Disconnect":
-            self.radio.disconnect()
+        if self.radio.running or self.connect_btn.text() == "Disconnect":
+            self.service.disconnect(reason="ui")
             self.connect_btn.setText("Connect")
             return
         text = self.server_combo.currentText()
@@ -317,7 +402,14 @@ class MainWindow(QMainWindow):
         except ValueError as e:
             QMessageBox.warning(self, "Server", "Invalid server address: %s" % e)
             return
-        label = spec.label()
+        self._remember_server(spec.label())
+        self.service.connect(spec, compression=self.compression.isChecked())
+        self.connect_btn.setText("Disconnect")
+
+    def _remember_server(self, label):
+        if self.server_combo.count() and self.server_combo.itemText(0) == label:
+            self.server_combo.setCurrentIndex(0)
+            return
         i = self.server_combo.findText(label)
         if i >= 0:
             self.server_combo.removeItem(i)
@@ -325,9 +417,6 @@ class MainWindow(QMainWindow):
         while self.server_combo.count() > MAX_HISTORY:
             self.server_combo.removeItem(self.server_combo.count() - 1)
         self.server_combo.setCurrentIndex(0)
-        self.radio._compression = self.compression.isChecked()
-        self.radio.connect(spec)
-        self.connect_btn.setText("Disconnect")
 
     # ================================================================== tuning
     def _show_tune(self, st):
@@ -422,32 +511,67 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Recording folder", self.rec_dir.text())
         if d:
             self.rec_dir.setText(d)
+            self._rec_dir_changed()
+
+    def _rec_dir_changed(self, *_):
+        self.service.record_dir = self.rec_dir.text().strip() or default_record_dir()
 
     @Slot(bool)
     def _record_toggled(self, on):
+        # The button only asks; the 'recording' event updates it (also for API starts/stops).
+        self._set_rec_button(not on)
         if not on:
-            info = self.radio.stop_recording()
-            self.rec_btn.setText("● Record")
-            self._rec_started = None
-            if info:
-                self.rec_label.setText("Saved %s (%.0f s)" % (os.path.basename(info["path"]), info["seconds"]))
+            self.service.stop_recording(reason="ui")
             return
-        folder = self.rec_dir.text().strip() or os.path.expanduser("~")
+        st = self.radio.tune
+        name = default_recording_name(st.freq_hz, st.mode, self.rec_format.currentData())
         try:
-            os.makedirs(folder, exist_ok=True)
-            st = self.radio.tune
-            path = os.path.join(folder, default_recording_name(st.freq_hz, st.mode,
-                                                               self.rec_format.currentData()))
-            self.radio.start_recording(path)
-        except Exception as e:
+            self._rec_dir_changed()
+            self.service.start_recording(path=os.path.join(self.service.record_dir, name),
+                                         formats=(".wav", ".m4a", ".mp4"))
+        except (ApiError, OSError, ValueError, RuntimeError) as e:
             QMessageBox.warning(self, "Record", str(e))
-            self.rec_btn.blockSignals(True)
-            self.rec_btn.setChecked(False)
-            self.rec_btn.blockSignals(False)
+
+    def _set_rec_button(self, active):
+        self.rec_btn.blockSignals(True)
+        self.rec_btn.setChecked(active)
+        self.rec_btn.setText("■ Stop" if active else "● Record")
+        self.rec_btn.blockSignals(False)
+
+    # ================================================================== API / policy
+    def _policy_changed(self, *_):
+        p = self.service.policy
+        p.limit_with_password_min = float(self.lim_pw.value())
+        p.limit_without_password_min = float(self.lim_pub.value())
+        p.reset_interval_min = float(self.reset_min.value())
+        p.reset_pause_s = float(self.reset_pause.value())
+        p.exempt_local = self.exempt_local.isChecked()
+        # takes effect on the next connect
+
+    @Slot(bool)
+    def _toggle_api(self, on):
+        if self.api is not None:
+            self.api.stop()
+            self.api = None
+        self.api_port.setEnabled(not on)
+        self.api_token.setEnabled(not on)
+        if not on:
+            self.api_status.setText("Off")
             return
-        self._rec_started = time.monotonic()
-        self.rec_btn.setText("■ Stop")
-        self.rec_label.setText(os.path.basename(path))
+        try:
+            self.api = ApiServer(self.service, "127.0.0.1", self.api_port.value(),
+                                 self.api_token.text().strip() or None)
+            self.api.start()
+        except (OSError, ValueError) as e:
+            self.api = None
+            self.api_status.setText("Could not start: %s" % e)
+            self.api_enable.blockSignals(True)
+            self.api_enable.setChecked(False)
+            self.api_enable.blockSignals(False)
+            self.api_port.setEnabled(True)
+            self.api_token.setEnabled(True)
+            return
+        self.api_status.setText("Listening on %s%s" % (self.api.url, "  (token required)" if self.api.token else ""))
 
     # ================================================================== rigctld
     @Slot(bool)
@@ -492,18 +616,29 @@ class MainWindow(QMainWindow):
             text, level = payload
             self.conn_label.setText(text)
             self.conn_label.setStyleSheet("color: #c0392b" if level == "error" else "")
-        elif kind == "stopped":
-            t = self.radio._thread
-            if t is None or not t.is_alive():      # ignore the old worker after a reconnect
-                self.connect_btn.setText("Connect")
-        elif kind == "connected":
-            if payload:
-                self.connect_btn.setText("Disconnect")
+        elif kind == "recording":
+            self._set_rec_button(payload["active"])
+            if payload["active"]:
+                self._rec_started = time.monotonic()
+                self.rec_label.setText(os.path.basename(payload["path"]))
             else:
+                self._rec_started = None
+                self.rec_label.setText("Saved %s (%.0f s)" % (os.path.basename(payload["path"]),
+                                                              payload["seconds"]))
+        elif kind == "session":
+            if payload and payload.get("ended") is None:
+                self._remember_server(payload["server"])
+                self.connect_btn.setText("Disconnect")
+            self._show_session(payload)
+        elif kind == "state":
+            state = payload[0]
+            info = self.service.session_info() or {}
+            idle = state in ("idle", "failed") and "reset_in_progress_s" not in info
+            self.connect_btn.setText("Connect" if idle else "Disconnect")
+        elif kind == "connected":
+            if not payload:
                 self.smeter.setValue(-127)
                 self.smeter.setFormat("—")
-                if self.radio._thread is None:
-                    self.connect_btn.setText("Connect")
         elif kind == "smeter":
             dbm = float(payload)
             self.smeter.setValue(int(max(-127, min(-13, dbm))))
@@ -531,7 +666,27 @@ class MainWindow(QMainWindow):
         elif kind == "rig_command":
             pass
 
+    def _show_session(self, info):
+        if not info or info.get("ended"):
+            self.session_label.setText("Session ended: %s" % info["ended"] if info and info.get("ended") else "")
+            return
+        parts = []
+        if info.get("local"):
+            parts.append("local Kiwi")
+        if "remaining_s" in info:
+            parts.append("limit in %s" % _hms(info["remaining_s"]))
+        elif info.get("local") is not None and not info.get("limit_s"):
+            parts.append("no session limit")
+        if "reset_in_progress_s" in info:
+            parts.append("periodic reset: reconnecting in %d s" % info["reset_in_progress_s"])
+        elif "next_reset_s" in info:
+            parts.append("reset in %s" % _hms(info["next_reset_s"]))
+        if info.get("resets"):
+            parts.append("%d reset%s" % (info["resets"], "" if info["resets"] == 1 else "s"))
+        self.session_label.setText("   ·   ".join(parts))
+
     def _tick(self, *_):
+        self._show_session(self.service.session_info())
         secs = self.radio.recording_seconds()
         if secs is not None and self._rec_started is not None:
             wall = time.monotonic() - self._rec_started
@@ -546,10 +701,17 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, ev):
         self._save_settings()
+        if self.api is not None:
+            self.api.stop()
         if self.rigctld is not None:
             self.rigctld.stop()
-        self.radio.shutdown()
+        self.service.shutdown()
         super().closeEvent(ev)
+
+
+def _hms(sec):
+    sec = int(sec)
+    return "%d:%02d:%02d" % (sec // 3600, sec % 3600 // 60, sec % 60)
 
 
 def run(argv):

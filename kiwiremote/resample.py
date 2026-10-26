@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Streaming mono resampler with a run-time adjustable ratio.
 
 Uses libsamplerate (python 'samplerate' package) when installed, otherwise a

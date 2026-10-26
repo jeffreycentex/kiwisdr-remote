@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Locate and import jks-prv/kiwiclient (not pip-installable).
 
 Search order:

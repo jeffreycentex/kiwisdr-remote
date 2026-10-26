@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # The tests are headless and need no Qt, PortAudio or audio hardware.
+      - name: Install test dependencies
+        run: python -m pip install numpy
+      - name: Byte-compile
+        run: python -m compileall -q kiwiremote tests run_kiwiremote.py fetch_kiwiclient.py
+      - name: Unit and integration tests
+        run: python -m unittest discover -s tests -v
