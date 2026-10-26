@@ -329,8 +329,12 @@ class TestHeadless(unittest.TestCase):
                                 cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if win else 0)
         try:
-            self.assertTrue(wait_for(lambda: ctl.main(["--port", str(port), "info"]) == 0, 15),
-                            "headless API never came up")
+            if not wait_for(lambda: proc.poll() is not None or ctl.main(["--port", str(port), "info"]) == 0, 30) \
+                    or proc.poll() is not None:
+                if proc.poll() is None:
+                    proc.kill()
+                self.fail("headless API never came up (exit %s):\n%s"
+                          % (proc.poll(), proc.communicate(timeout=10)[0].decode(errors="replace")))
             cl = ctl.ApiClient(port=port)
             code, r = cl.connect("127.0.0.1:%d" % kiwi.port, wait=8)
             self.assertEqual(code, 200, r)
