@@ -20,8 +20,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.10", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       # The tests are headless and need no Qt, PortAudio or audio hardware.
@@ -30,4 +30,11 @@ jobs:
       - name: Byte-compile
         run: python -m compileall -q kiwiremote tests run_kiwiremote.py fetch_kiwiclient.py
       - name: Unit and integration tests
-        run: python -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee test-output.txt
+      - name: Report failures as annotations
+        if: failure()
+        shell: bash
+        run: python .github/report_failures.py test-output.txt
