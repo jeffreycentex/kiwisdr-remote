@@ -244,7 +244,12 @@ class TestEndToEnd(unittest.TestCase):
                 except OSError:
                     return
                 hits[i] += 1
-                c.recv(4096)
+                req = b""                # read the whole request first: closing
+                while b"\r\n\r\n" not in req:  # with unread data sends a TCP reset
+                    chunk = c.recv(4096)
+                    if not chunk:
+                        break
+                    req += chunk
                 c.sendall(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:%d/\r\n\r\n"
                           % ports[1 - i])
                 c.close()

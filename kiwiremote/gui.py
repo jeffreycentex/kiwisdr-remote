@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .radio import RadioController
 from .rigctld import RigctldServer
-from .sinks import (HAVE_PYAV, HAVE_SOUNDDEVICE, PULSE_PREFIX, create_null_sink,
+from .sinks import (HAVE_PYAV, HAVE_SOUNDDEVICE, PULSE_PREFIX, create_virtual_cable,
                     default_recording_name, guess_virtual_cable, list_output_devices,
                     sounddevice_error)
 from .state import DEFAULT_PASSBAND, MODES, ServerSpec
@@ -185,9 +185,9 @@ class MainWindow(QMainWindow):
         g.addWidget(self.device_combo, 0, 1)
         g.addWidget(refresh, 0, 2)
         if sys.platform.startswith("linux") and shutil.which("pactl"):
-            mk = QPushButton("Create 'KiwiSDR' virtual sink")
-            mk.setToolTip("pactl load-module module-null-sink sink_name=KiwiSDR\n"
-                          "Other programs record from 'Monitor of KiwiSDR'.")
+            mk = QPushButton("Create 'KiwiSDR' virtual cable")
+            mk.setToolTip("Creates sink 'KiwiSDR' (play to it here) and input source\n"
+                          "'KiwiSDR-RX' (select it as Input in WSJT-X / JS8Call / fldigi).")
             mk.clicked.connect(self._create_pulse_sink)
             g.addWidget(mk, 3, 1, 1, 2)
         g.addWidget(QLabel("Gain"), 1, 0)
@@ -394,12 +394,19 @@ class MainWindow(QMainWindow):
 
     def _create_pulse_sink(self, *_):
         try:
-            name = create_null_sink("KiwiSDR")
+            sink, source = create_virtual_cable("KiwiSDR")
         except Exception as e:
-            QMessageBox.warning(self, "Virtual sink", str(e))
+            QMessageBox.warning(self, "Virtual cable", str(e))
             return
-        self._refresh_devices(select=PULSE_PREFIX + name)
+        self._refresh_devices(select=PULSE_PREFIX + sink)
         self._device_changed()
+        QMessageBox.information(
+            self, "Virtual cable",
+            "Created sink '%s' and input source '%s-RX'.\n\n"
+            "In WSJT-X / JS8Call / fldigi select Input = %s-RX, then restart that "
+            "program (they only list audio devices at startup).\n\n"
+            "The cable lasts until logout; see the README to make it permanent."
+            % (sink, sink, sink))
 
     def _device_changed(self, *_):
         if self.audio_enable.isChecked():

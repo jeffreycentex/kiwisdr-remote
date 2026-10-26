@@ -55,12 +55,12 @@ def sounddevice_error():
 PULSE_PREFIX = "pulse-sink:"
 
 
-def list_pulse_sinks():
-    """Linux only: names of PulseAudio / PipeWire-pulse sinks (via pactl)."""
+def _pactl_names(kind):
+    """Linux only: names from 'pactl list short <kind>' (sinks / sources)."""
     if not sys.platform.startswith("linux") or not shutil.which("pactl"):
         return []
     try:
-        res = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True,
+        res = subprocess.run(["pactl", "list", "short", kind], capture_output=True,
                              text=True, timeout=3)
     except (OSError, subprocess.SubprocessError):
         return []
@@ -72,20 +72,50 @@ def list_pulse_sinks():
     return names
 
 
-def create_null_sink(name="KiwiSDR"):
-    """Linux only: create a virtual sink. Its 'Monitor of <name>' source is the
-    'other end of the cable' that WSJT-X/fldigi record from. Lasts until the
-    sound server restarts (see README for a permanent setup)."""
-    if name in list_pulse_sinks():
-        return name
+def list_pulse_sinks():
+    """Linux only: names of PulseAudio / PipeWire-pulse sinks (via pactl)."""
+    return _pactl_names("sinks")
+
+
+def list_pulse_sources():
+    """Linux only: names of PulseAudio / PipeWire-pulse sources (via pactl)."""
+    return _pactl_names("sources")
+
+
+def _pactl_load(*args):
     if not shutil.which("pactl"):
         raise RuntimeError("pactl not found (install pulseaudio-utils / pipewire-pulse)")
-    res = subprocess.run(["pactl", "load-module", "module-null-sink", "sink_name=%s" % name,
-                          "sink_properties=device.description=%s" % name],
+    res = subprocess.run(["pactl", "load-module"] + list(args),
                          capture_output=True, text=True, timeout=5)
     if res.returncode != 0:
-        raise RuntimeError(res.stderr.strip() or "pactl load-module failed")
-    return name
+        raise RuntimeError(res.stderr.strip() or "pactl load-module %s failed" % args[0])
+
+
+def create_virtual_cable(name="KiwiSDR"):
+    """Linux only: create a virtual audio cable for programs such as WSJT-X.
+
+    * sink '<name>'        - KiwiSDR Remote plays into this.
+    * source '<name>_RX'   - a remap of '<name>.monitor', shown as '<name>-RX'.
+      It's a real capture device, unlike the monitor source, which Qt-based
+      programs (WSJT-X, JS8Call) often don't list as an input at all.
+
+    Existing pieces are reused. Lasts until the sound server restarts (see the
+    README for a permanent setup). Returns (sink_name, source_name).
+    """
+    sink, source = name, name + "_RX"
+    if sink not in list_pulse_sinks():
+        _pactl_load("module-null-sink", "sink_name=%s" % sink,
+                    "sink_properties=device.description=%s" % sink)
+    if source not in list_pulse_sources():
+        _pactl_load("module-remap-source", "master=%s.monitor" % sink,
+                    "source_name=%s" % source,
+                    "source_properties=device.description=%s-RX" % name)
+    return sink, source
+
+
+def create_null_sink(name="KiwiSDR"):
+    """Backward-compatible wrapper: creates the full virtual cable, returns the sink."""
+    return create_virtual_cable(name)[0]
 
 
 def _pulse_pa_index():
