@@ -114,12 +114,23 @@ class TestSessionPolicy(ServiceCase):
         time.sleep(0.5)
         self.assertEqual(k.connections, 1)
 
-    def test_password_gets_longer_limit(self):
+    def test_password_session_keeps_going_with_resets(self):
         k = self.kiwi(password="s3cret")
         svc = self.service(exempt_local=False)
         st = svc.connect("127.0.0.1:%d" % k.port, password="s3cret", wait=8)
         self.assertEqual(st["state"], "connected")
-        self.assertEqual(st["session"]["limit_s"], 120 * 60)
+        self.assertIsNone(st["session"]["limit_s"])            # no limit with a password
+        self.assertEqual(st["session"]["reset_interval_s"], 120 * 60)
+        for n in (1, 2):                                       # still going after 2 resets (4 h)
+            self.clock.advance(120 * 60)
+            svc.tick()                                         # -> reset
+            self.assertFalse(svc.radio.connected)
+            self.clock.advance(15)
+            svc.tick()                                         # -> reconnect
+            self.assertTrue(wait_for(lambda: svc.radio.connected))
+            self.assertEqual(svc.session_info()["resets"], n)
+        self.assertIsNone(svc.session_info()["ended"])
+        self.assertEqual(k.connections, 3)
 
     def test_bad_password_fails(self):
         k = self.kiwi(password="s3cret")
