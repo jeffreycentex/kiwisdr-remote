@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Audio sinks. Each sink receives mono int16 blocks at the Kiwi's sample rate.
 
 All sinks share this interface (called from the Kiwi worker thread):
@@ -484,6 +485,21 @@ class WavSink:
             return
         self._wav.writeframesraw(samples.astype("<i2", copy=False).tobytes())
         self.frames += len(samples)
+
+    @property
+    def rate(self):
+        return self._rate
+
+    def write_silence(self, seconds):
+        if self._wav is None or seconds <= 0:
+            return
+        n = int(round(seconds * self._rate))
+        block = np.zeros(min(n, self._rate * 10), dtype="<i2").tobytes()
+        while n > 0:
+            k = min(n, len(block) // 2)
+            self._wav.writeframesraw(block[:2 * k])
+            self.frames += k
+            n -= k
 
     def seconds(self):
         return self.frames / self._rate if self._rate else 0.0

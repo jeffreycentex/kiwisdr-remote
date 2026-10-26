@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Kiwi connection worker + controller (no GUI dependencies).
 
 Threading model
@@ -13,6 +14,7 @@ Threading model
 """
 
 import logging
+import re
 import socket
 import threading
 import time
@@ -32,7 +34,16 @@ except Exception:  # pragma: no cover
     class ConnectionTerminatedException(Exception):
         pass
 
+# Connection states reported by RadioController.state
+IDLE = "idle"                  # no worker running
+CONNECTING = "connecting"      # first attempt in progress
+CONNECTED = "connected"        # audio is flowing
+RECONNECTING = "reconnecting"  # lost the link, retrying
+BUSY = "busy"                  # server full, retrying
+FAILED = "failed"              # gave up (bad password, server down, redirect loop)
+
 RECONNECT_DELAY = 5.0
+MAX_GAP_FILL = 1800.0          # seconds of silence inserted at most for one gap
 BUSY_DELAY = 15.0
 SMETER_INTERVAL = 0.1
 MAX_HTTP_REDIRECTS = 5
@@ -108,6 +119,15 @@ class _KiwiAudioStream(K.KiwiSDRStream):
         stream_option.unmask_receive = False
         self._stream = K.Stream(request, stream_option)
 
+    # kiwiclient logs every command at debug level, including the password in
+    # 'SET auth'. Send that one ourselves with the password masked in the log.
+    def _send_message(self, msg):
+        if msg.startswith("SET auth"):
+            log.debug("send SET (%s) \"%s\"", self._stream_name, re.sub(r" (p|ipl)=\S*", r" \1=***", msg))
+            self._stream.send_message(msg)
+            return
+        super()._send_message(msg)
+
     # Called by kiwiclient when the server sends sample_rate (start of audio).
     def _setup_rx_params(self):
         self.set_name(self._options.user)
@@ -163,7 +183,13 @@ class RadioController:
         self._sink_lock = threading.Lock()
         self._sinks = {}       # 'card' / 'file' -> sink
         self._last_smeter = 0.0
+        self._last_audio = None    # monotonic time of the last audio block
         self.rssi = None
+        self.state = IDLE
+        self.last_error = None
+        self.connected_since = None    # monotonic, None while not connected
+        self.reconnects = 0            # automatic reconnects since connect()
+        self.gap_seconds = 0.0         # silence inserted into the current recording
 
     # ------------------------------------------------------------------ events
     def _emit(self, kind, payload=None):
@@ -176,6 +202,12 @@ class RadioController:
         getattr(log, "warning" if level == "error" else level)(text)
         self._emit("status", (text, level))
 
+    def _set_state(self, state, error=None):
+        self.state = state
+        if error is not None or state in (CONNECTED, CONNECTING):
+            self.last_error = error
+        self._emit("state", (state, self.last_error))
+
     # ------------------------------------------------------------------ tune
     @property
     def tune(self):
@@ -185,6 +217,24 @@ class RadioController:
     @property
     def connected(self):
         return self._connected
+
+    @property
+    def server(self):
+        return self._server
+
+    def peer_address(self):
+        """IP address of the Kiwi (or proxy) we are actually connected to, or None."""
+        st = self._stream
+        try:
+            return st._socket.getpeername()[0] if st is not None and st._socket else None
+        except OSError:
+            return None
+
+    @property
+    def running(self):
+        """True while a worker is trying to stay connected (any state but idle/failed)."""
+        t = self._thread
+        return t is not None and t.is_alive()
 
     @property
     def freq_limits(self):
@@ -220,6 +270,8 @@ class RadioController:
     def connect(self, server: ServerSpec):
         self.disconnect()
         self._server = server
+        self.reconnects = 0
+        self._set_state(CONNECTING)
         # Fresh event per worker: a previous worker that outlived disconnect()'s
         # join timeout must stay stopped instead of being revived by clear().
         self._stop = threading.Event()
@@ -239,18 +291,28 @@ class RadioController:
                 pass
         t.join(timeout)
         self._thread = None
+        if self.state != FAILED:
+            self._set_state(IDLE)
 
     def _set_connected(self, flag):
         if flag != self._connected:
             self._connected = flag
+            self.connected_since = time.monotonic() if flag else None
             self._emit("connected", flag)
 
     def _run(self, stop):
         server = self._server
         redirects = 0
+        failed = None
+        first = True
         while not stop.is_set():
             delay = RECONNECT_DELAY
             stream = None
+            if not first:
+                self.reconnects += 1
+                if self.state not in (BUSY,):
+                    self._set_state(RECONNECTING, self.last_error)
+            first = False
             try:
                 self._status("Connecting to %s ..." % server.label())
                 opts = _make_options(server, self.tune, self._compression)
@@ -268,12 +330,15 @@ class RadioController:
                             self._status("Tune failed: %s" % e, "error")
                     stream.run()
             except K.KiwiTooBusyError:
-                self._status("%s: all channels busy, retrying in %ds" % (server.label(), BUSY_DELAY), "error")
+                msg = "%s: all channels busy, retrying in %ds" % (server.label(), BUSY_DELAY)
+                self._status(msg, "error")
+                self._set_state(BUSY, msg)
                 delay = BUSY_DELAY
             except K.KiwiRedirectError as e:
                 redirects += 1
                 if redirects > MAX_HTTP_REDIRECTS:
-                    self._status("%s: too many redirects, giving up" % self._server.label(), "error")
+                    failed = "%s: too many redirects, giving up" % self._server.label()
+                    self._status(failed, "error")
                     break
                 u = urlparse(str(e))
                 if u.hostname:
@@ -282,19 +347,23 @@ class RadioController:
                     self._status("Redirected to %s" % server.label())
                     delay = 1.0
             except (K.KiwiBadPasswordError, K.KiwiDownError) as e:
-                self._status(str(e), "error")
+                failed = str(e)
+                self._status(failed, "error")
                 break
             except (K.KiwiServerTerminatedConnection, ConnectionTerminatedException,
                     K.KiwiConnectionError, OSError) as e:
                 if stop.is_set():
                     break
-                self._status("Connection lost (%s); reconnecting in %ds" % (e or type(e).__name__,
-                                                                            RECONNECT_DELAY), "error")
+                msg = "Connection lost (%s); reconnecting in %ds" % (e or type(e).__name__, RECONNECT_DELAY)
+                self._status(msg, "error")
+                self.last_error = msg
             except Exception as e:
                 if stop.is_set():
                     break
                 log.exception("worker error")
-                self._status("Error: %s; reconnecting in %ds" % (e, RECONNECT_DELAY), "error")
+                msg = "Error: %s; reconnecting in %ds" % (e, RECONNECT_DELAY)
+                self._status(msg, "error")
+                self.last_error = msg
             finally:
                 if self._stream is stream:
                     self._stream = None
@@ -308,7 +377,12 @@ class RadioController:
                         pass
             stop.wait(delay)
         self._set_connected(False)
-        self._status("Disconnected")
+        if failed is not None:
+            self._set_state(FAILED, failed)
+        elif self._stop is stop:       # not superseded by a newer connect()
+            self._set_state(IDLE)
+        self._status("Disconnected" if failed is None else "Stopped: %s" % failed,
+                     "info" if failed is None else "error")
         self._emit("stopped")
 
     # ------------------------------------------------------------------ stream callbacks
@@ -316,12 +390,31 @@ class RadioController:
         self._rate = stream._sample_rate
         self._limits = stream.freq_limits_hz()
         with self._sink_lock:
+            self._fill_recording_gap()
             for name, sink in list(self._sinks.items()):
                 self._sink_set_rate(name, sink)
         self._set_connected(True)
+        self._set_state(CONNECTED)
         self._emit("rate", self._rate)
         self._emit("limits", self._limits)
         self._status("Connected to %s (%.1f Hz audio)" % (self._server.label(), self._rate))
+
+    def _fill_recording_gap(self):
+        """After a reconnect, pad the recording with silence for the time no audio
+        arrived, so positions in the file keep matching wall-clock time."""
+        sink = self._sinks.get("file")
+        last, self._last_audio = self._last_audio, None
+        if sink is None or last is None or not hasattr(sink, "write_silence"):
+            return
+        gap = time.monotonic() - last
+        if gap < 0.5:
+            return
+        if getattr(sink, "rate", None) != int(round(self._rate)):
+            return                       # new rate -> the sink starts a new file part
+        gap = min(gap, MAX_GAP_FILL)
+        sink.write_silence(gap)
+        self.gap_seconds += gap
+        log.info("recording: inserted %.1f s of silence for the reconnect gap", gap)
 
     def _report_clamp(self, want, lo, hi, got):
         with self._lock:
@@ -334,6 +427,7 @@ class RadioController:
     def _on_audio(self, samples, rssi):
         self.rssi = rssi
         now = time.monotonic()
+        self._last_audio = now
         if now - self._last_smeter >= SMETER_INTERVAL:
             self._last_smeter = now
             self._emit("smeter", rssi)
@@ -381,6 +475,9 @@ class RadioController:
 
     def start_recording(self, path):
         sink = make_file_sink(path)
+        if not self._connected:
+            self._last_audio = None      # don't pad for time before this recording
+        self.gap_seconds = 0.0
         ok = self._install_sink("file", sink)
         if ok:
             self._emit("recording", {"active": True, "path": path})
@@ -392,13 +489,18 @@ class RadioController:
         if sink is None:
             return None
         sink.close()
-        info = {"active": False, "path": sink.current_path or sink.path, "seconds": sink.seconds()}
+        info = {"active": False, "path": sink.current_path or sink.path, "seconds": sink.seconds(),
+                "gap_seconds": round(self.gap_seconds, 1)}
         self._emit("recording", info)
         return info
 
     def recording_seconds(self):
         sink = self._sinks.get("file")
         return sink.seconds() if sink else None
+
+    def recording_path(self):
+        sink = self._sinks.get("file")
+        return (sink.current_path or sink.path) if sink else None
 
     def audio_stats(self):
         sink = self._sinks.get("card")

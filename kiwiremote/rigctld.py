@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Minimal hamlib rigctld (NET rigctl, hamlib model 2) server.
 
 Lets WSJT-X, fldigi, JS8Call, GridTracker, Log4OM, `rigctl -m 2`, etc. read

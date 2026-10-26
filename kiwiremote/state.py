@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Radio state model shared by the GUI, the rigctld server and the Kiwi worker.
 
 Units: frequency is stored in Hz (hamlib convention). The Kiwi API uses kHz;
