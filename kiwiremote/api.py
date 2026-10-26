@@ -22,6 +22,7 @@ import ipaddress
 import json
 import logging
 import socket
+import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -156,6 +157,12 @@ class _Handler(BaseHTTPRequestHandler):
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def server_bind(self):
+        # HTTPServer.server_bind() calls socket.getfqdn(), a reverse DNS lookup
+        # that can block for 30 s+ on macOS. The name is never used here.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class _Server6(_Server):
