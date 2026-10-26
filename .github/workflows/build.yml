@@ -2,11 +2,18 @@ name: Build
 
 # Builds standalone apps with PyInstaller on each OS.
 # - Manual run (Actions tab -> Build -> Run workflow) or any push of a v* tag.
+# - Pull requests that touch the packaging also build, so a broken spec is caught before merge.
 # - A v* tag (e.g. v0.2.0) also creates a GitHub release with the archives attached.
 
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - kiwiremote.spec
+      - requirements.txt
+      - run_kiwiremote.py
+      - .github/workflows/build.yml
   workflow_dispatch:
 
 permissions:
