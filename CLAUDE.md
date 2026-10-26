@@ -42,7 +42,7 @@ python -m unittest discover -s tests -v             # needs only numpy
 - `KiwiService` takes an injectable `clock` and `start_ticker=False`, so tests can call `tick()` on simulated time. Use that for anything time-based; don't sleep for minutes in tests.
 
 ## Session policy (specified by the user; don't change it silently)
-- The limit is 120 min with a password and 45 min without. The limit is total connected time; resets don't restart it. When the limit is reached, the recording is closed and the app disconnects.
+- With a password there is no limit: the session keeps going and reconnects at each periodic reset. Without a password the limit is 45 min. A limit is total connected time; resets don't restart it. When it's reached, the recording is closed and the app disconnects. (Until v0.2.0 the password limit was 120 min; `gui.py` migrates saved settings via `policy_version`.)
 - The periodic reset is every 120 min of connection: disconnect, wait 15 s, reconnect. The recording continues, and silence is inserted for the gap.
 - Kiwis on loopback, private or link-local **peer** addresses are exempt from both. The user's own Kiwi is on the LAN.
 - Per-connect overrides (`session_limit_min`, `reset_interval_min`) win, even for local Kiwis. `0` means off.

@@ -303,10 +303,13 @@ class MainWindow(QMainWindow):
         return box
 
     # ================================================================== settings
+    POLICY_VERSION = 2   # 2: passworded sessions have no limit by default (reconnect and keep going)
+
     def _load_policy(self):
         s, d = self.settings, SessionPolicy()
+        old = s.value("policy_version", 1, type=int) < self.POLICY_VERSION
         return SessionPolicy(
-            s.value("limit_password_min", d.limit_with_password_min, type=float),
+            d.limit_with_password_min if old else s.value("limit_password_min", d.limit_with_password_min, type=float),
             s.value("limit_public_min", d.limit_without_password_min, type=float),
             s.value("reset_interval_min", d.reset_interval_min, type=float),
             s.value("reset_pause_s", d.reset_pause_s, type=float),
@@ -381,6 +384,7 @@ class MainWindow(QMainWindow):
         s.setValue("rig_port", self.rig_port.value())
         pol = self.service.policy
         s.setValue("limit_password_min", pol.limit_with_password_min)
+        s.setValue("policy_version", self.POLICY_VERSION)
         s.setValue("limit_public_min", pol.limit_without_password_min)
         s.setValue("reset_interval_min", pol.reset_interval_min)
         s.setValue("reset_pause_s", pol.reset_pause_s)

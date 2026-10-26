@@ -8,7 +8,7 @@ A cross-platform (Windows / macOS / Linux) desktop application for a remote Kiwi
 - Built-in **hamlib rigctld server** (NET rigctl, model 2). External programs can read and set the frequency and mode, and the GUI follows those changes.
 
 - **Remote-control API** (HTTP/JSON on localhost) for schedulers and scripts. Through it, a program can connect to a server with a password, tune, start and stop WAV recordings, and disconnect. A **headless mode** runs the API, rigctld and recording without a window. Both are described in [docs/API.md](docs/API.md).
-- **Session limits** that keep public Kiwi operators happy: 2 h with a password, 45 min without, and a reconnect every 2 h. Kiwis on your own LAN are exempt.
+- **Session limits** that keep public Kiwi operators happy: a 15 s reconnect every 2 h, and a 45 min limit for sessions without a password. Kiwis on your own LAN are exempt.
 
 It uses [jks-prv/kiwiclient](https://github.com/jks-prv/kiwiclient) for the KiwiSDR websocket protocol.
 

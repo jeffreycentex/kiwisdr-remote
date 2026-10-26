@@ -134,14 +134,14 @@ The policy is configured in the GUI box, or with headless flags. Overrides are p
 
 | Rule | Default | |
 |---|---|---|
-| Limit with a password | 120 min | total connected time; then the recording is closed and the app disconnects |
-| Limit without a password | 45 min | same |
-| Periodic reset | every 120 min | disconnect, wait 15 s (`reset_pause_s`), reconnect. The limit keeps counting across resets |
+| Limit with a password | none | the session keeps going, reconnecting at every periodic reset |
+| Limit without a password | 45 min | total connected time; then the recording is closed and the app disconnects |
+| Periodic reset | every 120 min | disconnect, wait 15 s (`reset_pause_s`), reconnect. The recording continues. A limit, if set, keeps counting across resets |
 | Local exemption | on | Kiwis reached over loopback, private (10/8, 172.16/12, 192.168/16, fc00::/7) or link-local addresses get no limit and no reset |
 
 - Locality is judged by the address actually connected to, not the name typed in. A LAN Kiwi reached through a public DNS name and your router's port forward counts as remote.
 - `session_limit_min` and `reset_interval_min` passed to `/connect` override the policy, including for local Kiwis.
-- With the defaults, a passworded session reaches its 120 min limit at the same moment the reset would fire, and the limit wins. Resets therefore only matter when a limit is longer than the reset interval, or turned off.
+- With the defaults, a passworded session to a remote Kiwi runs until you disconnect, with a 15 s reconnect every 2 hours. A session without a password stops after 45 min.
 
 ## Security
 

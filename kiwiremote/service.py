@@ -5,12 +5,12 @@ this class, so whatever one of them does, the others see.
 
 Session policy (all values configurable; 0 turns an item off)
 --------------------------------------------------------------
-* Session limit: total connected time per connect() call. 120 min when a
-  password was given, 45 min without. At the limit the recording is closed
-  and the connection dropped.
+* Session limit: total connected time per connect() call. Default: none when
+  a password was given (the session keeps going, with periodic resets), 45 min
+  without. At the limit the recording is closed and the connection dropped.
 * Periodic reset: every 120 min of connection, disconnect for 15 s and
-  reconnect, which is polite to Kiwi operators. The session limit keeps
-  counting across resets.
+  reconnect, which is polite to Kiwi operators. A session limit, if any,
+  keeps counting across resets.
 * Servers reached over loopback, private (RFC 1918 / ULA) or link-local
   addresses are exempt from both by default: that is your own Kiwi.
   Locality is decided from the address actually connected to, after connecting.
@@ -41,7 +41,7 @@ TICK_SECONDS = 0.5
 
 @dataclasses.dataclass
 class SessionPolicy:
-    limit_with_password_min: float = 120.0
+    limit_with_password_min: float = 0.0     # 0 = no limit: keep going, reset every 2 h
     limit_without_password_min: float = 45.0
     reset_interval_min: float = 120.0
     reset_pause_s: float = 15.0
