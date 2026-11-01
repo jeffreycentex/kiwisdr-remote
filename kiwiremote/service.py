@@ -158,13 +158,14 @@ class KiwiService:
 
     # ------------------------------------------------------------------ connection
     def connect(self, server, password="", user=None, wait=0.0,
-                session_limit_min=None, reset_interval_min=None, compression=None):
-        """server: 'host[:port]' text or ServerSpec. Returns status()."""
+                session_limit_min=None, reset_interval_min=None, compression=None, tls=False):
+        """server: 'host[:port]' text or ServerSpec. Returns status().
+        tls applies to text only; an https:// address turns it on by itself."""
         if isinstance(server, ServerSpec):
             spec = server
         else:
             try:
-                spec = ServerSpec.parse(server, password or "", user or "kiwiremote")
+                spec = ServerSpec.parse(server, password or "", user or "kiwiremote", tls=bool(tls))
             except (ValueError, TypeError) as e:
                 raise ApiError("bad_request", "invalid server address: %s" % e)
         for name, v in (("session_limit_min", session_limit_min), ("reset_interval_min", reset_interval_min)):
@@ -292,7 +293,7 @@ class KiwiService:
         if s is None:
             return None
         now = self._clock()
-        d = {"server": s.spec.label(), "password": bool(s.spec.password),
+        d = {"server": s.spec.label(), "password": bool(s.spec.password), "tls": s.spec.tls,
              "local": s.local, "limit_s": s.limit_s, "reset_interval_s": s.reset_s,
              "resets": s.resets, "reconnects": self.radio.reconnects, "ended": s.ended}
         if s.started is not None:

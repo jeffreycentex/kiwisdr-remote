@@ -16,6 +16,7 @@ Threading model
 import logging
 import re
 import socket
+import ssl
 import threading
 import time
 import types
@@ -54,6 +55,36 @@ class KiwiRedirectLoopError(K.KiwiDownError):
     proxy2.kiwisdr.com bouncing 307s between each other while the Kiwi is offline."""
 
 
+class KiwiTlsError(K.KiwiDownError):
+    """The TLS handshake failed: an untrusted certificate, or TLS chosen for a
+    server that doesn't speak it. Retrying won't help, so the worker gives up."""
+
+
+def _tls_context():
+    """Certificates are verified against the system store, plus certifi's
+    bundle when it is installed (python.org and frozen macOS builds may have
+    no usable system store)."""
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except (ImportError, OSError):
+        pass
+    return ctx
+
+
+def _wrap_tls(sock, host):
+    try:
+        return _tls_context().wrap_socket(sock, server_hostname=host)
+    except ssl.SSLCertVerificationError as e:
+        sock.close()
+        raise KiwiTlsError("TLS certificate of %s not trusted: %s" % (host, e.verify_message or e))
+    except ssl.SSLError as e:
+        sock.close()
+        raise KiwiTlsError("TLS handshake with %s failed (%s); does this server use https?"
+                           % (host, e.reason or e))
+
+
 def _make_options(server, tune, compression):
     """Build the options object kiwiclient's KiwiSDRStream reads attributes from."""
     return types.SimpleNamespace(
@@ -69,6 +100,7 @@ def _make_options(server, tune, compression):
         dir=None, filename=None, station=None, test_mode=False, wf_cal=None,
         idx=0, tlimit=None, socket_timeout=10,
         ws_timestamp=int(time.time()) & 0xFFFFFFFF,
+        tls=server.tls,
     )
 
 
@@ -91,11 +123,12 @@ class _KiwiAudioStream(K.KiwiSDRStream):
         self._stream_name = which
         uri = "%s/%d/%s%s" % ("/wb" if self._options.wideband else "", self._options.ws_timestamp, which,
                               "?camp" if self._camp_chan != -1 else "")
+        tls = self._options.tls
         visited = []
         while True:
             if self._stop_event.is_set():
                 raise K.KiwiConnectionError("connection cancelled")
-            hop = "%s:%s" % (host, port)
+            hop = "%s%s:%s" % ("https://" if tls else "", host, port)
             if hop in visited:
                 raise KiwiRedirectLoopError("%s appears to be offline (redirect loop: %s)"
                                             % (visited[0], " -> ".join(visited + [hop])))
@@ -104,13 +137,20 @@ class _KiwiAudioStream(K.KiwiSDRStream):
             visited.append(hop)
             log.info("URL: %s%s", hop, uri)
             self._socket = socket.create_connection((host, port), timeout=self._options.socket_timeout)
+            if tls:
+                self._socket = _wrap_tls(self._socket, host)
             location, status_code = K.ClientHandshakeProcessor(self._socket, host, port).handshake(uri)
             if status_code == "101":
                 break
             self._socket.close()
             u = urlparse(location)
-            host, port = u.hostname or host, u.port or port
-            log.warning("HTTP %s redirect to %s:%s", status_code, host, port)
+            if u.scheme in ("http", "ws", "https", "wss"):
+                tls = u.scheme in ("https", "wss")
+                port = u.port or (443 if tls else 80)
+            else:
+                port = u.port or port
+            host = u.hostname or host
+            log.warning("HTTP %s redirect to %s%s:%s", status_code, "https://" if tls else "", host, port)
 
         request = K.ClientRequest(self._socket)
         request.ws_version = K.VERSION_HYBI13
@@ -342,7 +382,9 @@ class RadioController:
                     break
                 u = urlparse(str(e))
                 if u.hostname:
-                    server = ServerSpec(u.hostname, u.port or server.port, server.password, server.user)
+                    tls = u.scheme in ("https", "wss") if u.scheme else server.tls
+                    port = u.port or (server.port if tls == server.tls else 443 if tls else 8073)
+                    server = ServerSpec(u.hostname, port, server.password, server.user, tls)
                     self._server = server
                     self._status("Redirected to %s" % server.label())
                     delay = 1.0

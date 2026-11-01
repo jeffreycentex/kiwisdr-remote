@@ -81,7 +81,8 @@ def main(argv=None):
     sub.add_parser("info")
     sub.add_parser("status")
     c = sub.add_parser("connect")
-    c.add_argument("server", help="host[:port]")
+    c.add_argument("server", help="host[:port], or https://host[:port] for TLS")
+    c.add_argument("--tls", action="store_true", help="connect over TLS (Kiwis served over https)")
     c.add_argument("--password", default="")
     c.add_argument("--user")
     c.add_argument("--wait", type=float, default=10.0, help="seconds to wait for audio (0 = return at once)")
@@ -111,7 +112,7 @@ def main(argv=None):
         elif a.cmd == "connect":
             code, resp = cl.connect(a.server, a.password, a.wait, **_drop_none({
                 "user": a.user, "session_limit_min": a.session_limit_min,
-                "reset_interval_min": a.reset_interval_min}))
+                "reset_interval_min": a.reset_interval_min, "tls": a.tls or None}))
         elif a.cmd == "disconnect":
             code, resp = cl.disconnect()
         elif a.cmd == "tune":

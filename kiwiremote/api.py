@@ -234,11 +234,14 @@ class ApiServer:
         compression = body.get("compression")
         if compression is not None and not isinstance(compression, bool):
             raise ApiError("bad_request", "compression must be true or false")
+        tls = body.get("tls", False)
+        if not isinstance(tls, bool):
+            raise ApiError("bad_request", "tls must be true or false")
         st = self.service.connect(server, password=_str(body, "password") or "",
                                   user=_str(body, "user"), wait=wait,
                                   session_limit_min=_num(body, "session_limit_min"),
                                   reset_interval_min=_num(body, "reset_interval_min"),
-                                  compression=compression)
+                                  compression=compression, tls=tls)
         if wait:
             if st["state"] == "connected":
                 return 200, st

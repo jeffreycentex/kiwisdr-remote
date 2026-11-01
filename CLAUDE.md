@@ -22,7 +22,7 @@ The app is **receive-only**. rigctld accepts PTT commands and ignores them.
 - `kiwiremote/sinks.py`: `SoundCardSink` (drift-locked resampling, see the README), `WavSink`, `M4aSink`, and Linux PulseAudio/PipeWire helpers.
 - `kiwiremote/rigctld.py`: the NET rigctl (model 2) subset that fldigi and WSJT-X use.
 - `third_party/kiwiclient`: a pinned copy of jks-prv/kiwiclient (GPL). Don't edit it. Override its behaviour in `radio.py` instead, and update it with `fetch_kiwiclient.py`.
-- `tests/fake_kiwi.py`: a fake KiwiSDR websocket server that sends ADPCM or raw audio and supports busy and password modes. Tests run against it.
+- `tests/fake_kiwi.py`: a fake KiwiSDR websocket server that sends ADPCM or raw audio and supports busy and password modes. Tests run against it. `TlsFront` puts an https front on it, using the self-signed test certificate in `tests/tls/` (for localhost and 127.0.0.1; test use only).
 
 ## Run / test
 ```bash
@@ -55,7 +55,7 @@ python -m unittest discover -s tests -v             # needs only numpy
 
 ## Conventions
 - License: GPL-3.0-or-later. New source files get the `# SPDX-License-Identifier: GPL-3.0-or-later` header.
-- Use the standard library for the API and CLI. Runtime dependencies are PySide6, numpy and sounddevice; samplerate and av are optional. `samplerate` is skipped on Windows through a requirements marker.
+- Use the standard library for the API and CLI. Runtime dependencies are PySide6, numpy and sounddevice; samplerate, av and certifi are optional. `samplerate` is skipped on Windows through a requirements marker.
 - Recordings never overwrite existing files; `_1`, `_2`, … is appended.
 - Python 3.10 or newer (CI tests 3.10 and 3.13).
 - Commit with a descriptive body, and reference issues with "Fixes #N".

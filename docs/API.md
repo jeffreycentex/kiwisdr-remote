@@ -55,7 +55,7 @@ Returns API information: `api_version`, `app_version`, and the list of endpoints
   "tune": {"freq_hz": 7110000, "mode": "LSB", "passband": 2800},
   "s_meter_dbm": -84.2,
   "session": {
-    "server": "kiwi.example.net:8073", "password": true, "local": false,
+    "server": "kiwi.example.net:8073", "password": true, "tls": false, "local": false,
     "limit_s": 7200, "remaining_s": 5321, "connected_for_s": 1879,
     "reset_interval_s": 7200, "next_reset_s": 5321,
     "resets": 0, "reconnects": 0, "ended": null
@@ -80,18 +80,19 @@ Returns API information: `api_version`, `app_version`, and the list of endpoints
 | `busy` | all of the server's channels are taken, retrying every 15 s |
 | `failed` | gave up; `last_error` says why (bad password, server down, redirect loop) |
 
-`session` is `null` before the first connect.
+`session` is `null` before the first connect. For a TLS connection, `server` (top level and in `session`) is written `https://host:port`, and `session.tls` is `true`.
 
 ### `POST /api/v1/connect`
 | Field | Type | Default | |
 |---|---|---|---|
-| `server` | string | **required** | `host`, `host:port` or a URL; the port defaults to 8073 |
+| `server` | string | **required** | `host`, `host:port` or a URL; the port defaults to 8073 (443 with TLS). An `https://` or `wss://` URL turns `tls` on |
 | `password` | string | `""` | the Kiwi's user password, or its time-limit-exemption password |
 | `user` | string | `"kiwiremote"` | name shown in the Kiwi's user list |
 | `wait` | number | `0` | seconds (at most 60) to wait for a definite answer |
 | `session_limit_min` | number | from policy | override for this session; `0` = no limit |
 | `reset_interval_min` | number | from policy | override for this session; `0` = no reset |
 | `compression` | bool | from GUI/CLI | request ADPCM-compressed audio |
+| `tls` | bool | `false` | connect over TLS, for Kiwis served over https. The certificate must be trusted (system store, or certifi's bundle when installed); an untrusted certificate fails the connect with `connect_failed` |
 
 If a connection already exists, it is replaced. A running recording continues across the switch, and if the new server's sample rate differs, a new file part (`_1.wav`) is started.
 
@@ -99,7 +100,7 @@ If a connection already exists, it is replaced. A running recording continues ac
 - **With `wait`**, the call returns one of:
   - `200`: connected
   - `503 busy`: all channels taken; the app keeps retrying
-  - `502 connect_failed`: bad password or server down; the app has stopped trying
+  - `502 connect_failed`: bad password, server down, or a TLS failure (untrusted certificate, or TLS asked of a server without it); the app has stopped trying
   - `504 timeout`: no answer yet; the app is still trying
 
 ### `POST /api/v1/disconnect`
@@ -205,7 +206,7 @@ Headless mode runs the API, rigctld and recording without a window and without Q
 - `--api-port`, `--api-token`
 - `--rigctl-port` or `--no-rigctl`
 - `--audio-device TEXT`: also play to an output device whose name contains `TEXT`
-- `--connect HOST[:PORT] --password …`: connect at startup
+- `--connect HOST[:PORT] --password …`: connect at startup; add `--tls`, or write `https://HOST[:PORT]`, for a Kiwi served over https
 - the policy flags: `--limit-password-min`, `--limit-public-min`, `--reset-interval-min`, `--reset-pause-s`, `--no-local-exempt`
 
 Ctrl+C or SIGTERM (Ctrl+Break on Windows) shuts down cleanly and finalizes the WAV file. Killing the process with `kill -9` or Task Manager leaves the WAV header without its final length.

@@ -98,28 +98,35 @@ class ServerSpec:
     port: int = 8073
     password: str = ""
     user: str = "kiwiremote"
+    tls: bool = False          # websocket over TLS (wss://), for Kiwis served over https
 
     @staticmethod
-    def parse(text, password="", user="kiwiremote"):
-        """Accept 'host', 'host:port', 'http://host:port/' forms."""
+    def parse(text, password="", user="kiwiremote", tls=False):
+        """Accept 'host', 'host:port', 'http://host:port/' forms.
+
+        An https:// or wss:// prefix turns TLS on whatever `tls` says. With TLS
+        and no port the default is 443, the https port, rather than 8073."""
         t = text.strip()
         for prefix in ("http://", "https://", "ws://", "wss://"):
             if t.lower().startswith(prefix):
                 t = t[len(prefix):]
+                tls = tls or prefix in ("https://", "wss://")
         t = t.split("/", 1)[0]
         if not t:
             raise ValueError("empty server address")
+        default_port = 443 if tls else 8073
         if t.startswith("["):  # [ipv6]:port
             host, _, rest = t[1:].partition("]")
-            port = int(rest[1:]) if rest.startswith(":") else 8073
+            port = int(rest[1:]) if rest.startswith(":") else default_port
         elif t.count(":") == 1:
             host, p = t.split(":")
             port = int(p)
         else:
-            host, port = t, 8073
+            host, port = t, default_port
         if not (0 < port < 65536):
             raise ValueError("bad port %d" % port)
-        return ServerSpec(host=host, port=port, password=password, user=user or "kiwiremote")
+        return ServerSpec(host=host, port=port, password=password, user=user or "kiwiremote", tls=bool(tls))
 
     def label(self):
-        return "%s:%d" % (self.host, self.port)
+        """'host:port', or 'https://host:port' with TLS (parse() reads it back)."""
+        return "%s%s:%d" % ("https://" if self.tls else "", self.host, self.port)
