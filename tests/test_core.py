@@ -4,19 +4,22 @@ against tests/fake_kiwi.py.  Run:  python -m unittest discover -s tests -v
 
 import os
 import socket
+import ssl
 import sys
 import tempfile
 import threading
 import time
 import unittest
 import wave
+from unittest import mock
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fake_kiwi import FakeKiwi  # noqa: E402
+from fake_kiwi import TLS_CERT, FakeKiwi, TlsFront  # noqa: E402
+from kiwiremote import radio  # noqa: E402
 from kiwiremote import resample  # noqa: E402
 from kiwiremote.radio import RadioController  # noqa: E402
 from kiwiremote.rigctld import RigctldServer  # noqa: E402
@@ -37,6 +40,16 @@ class TestState(unittest.TestCase):
         self.assertEqual(ServerSpec.parse("http://kiwi.example.net:8074/").label(), "kiwi.example.net:8074")
         self.assertEqual(ServerSpec.parse("10.0.0.5").port, 8073)
         self.assertEqual(ServerSpec.parse("[::1]:8075").host, "::1")
+
+    def test_server_parse_tls(self):
+        s = ServerSpec.parse("https://kiwi.example.net/")
+        self.assertEqual((s.tls, s.port, s.label()), (True, 443, "https://kiwi.example.net:443"))
+        self.assertEqual(ServerSpec.parse(s.label()), s)                  # GUI history round trip
+        self.assertEqual(ServerSpec.parse("wss://k:8073").port, 8073)
+        s = ServerSpec.parse("kiwi.example.net:8073", tls=True)
+        self.assertEqual((s.tls, s.port), (True, 8073))
+        self.assertEqual(ServerSpec.parse("kiwi.example.net", tls=True).port, 443)
+        self.assertFalse(ServerSpec.parse("http://kiwi.example.net").tls)
 
     def test_passband(self):
         self.assertEqual(passband_edges("USB", 2800), (200, 3000))
@@ -136,6 +149,102 @@ class TestRigctld(unittest.TestCase):
 
     def test_two_commands_one_line(self):
         self.assertEqual(self.ask("F 3573000 f", 2), ["RPRT 0", "3573000"])
+
+
+def _trust_test_cert():
+    return mock.patch.object(radio, "_tls_context", lambda: ssl.create_default_context(cafile=TLS_CERT))
+
+
+def _one_shot_http_server(reply):
+    """Answers every connection with `reply` (bytes or a callable returning bytes) and closes."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(16)
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                c.settimeout(5)
+                c.recv(4096)
+                c.sendall(reply() if callable(reply) else reply)
+                time.sleep(0.1)      # let the client read before the close
+            except OSError:
+                pass
+            c.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv
+
+
+class TestTls(unittest.TestCase):
+    def test_tls_connect_streams_audio(self):
+        kiwi = FakeKiwi()
+        front = TlsFront(kiwi.port)
+        ctl = RadioController(compression=False)
+        try:
+            with _trust_test_cert():
+                ctl.set_frequency(10_000_000)
+                ctl.connect(ServerSpec("127.0.0.1", front.port, tls=True))
+                self.assertTrue(wait_for(lambda: ctl.connected), "never connected over TLS")
+                self.assertTrue(wait_for(lambda: kiwi.mods()))
+                self.assertIn("freq=10000.000", kiwi.mods()[0])
+                self.assertEqual(ctl.peer_address(), "127.0.0.1")
+                self.assertTrue(wait_for(lambda: ctl.rssi is not None))
+        finally:
+            ctl.shutdown()
+            front.stop()
+            kiwi.stop()
+        self.assertEqual(front.handshake_errors, 0)
+
+    def test_untrusted_certificate_stops(self):
+        kiwi = FakeKiwi()
+        front = TlsFront(kiwi.port)
+        events = []
+        ctl = RadioController(on_event=lambda k, p: events.append((k, p)))
+        try:
+            ctl.connect(ServerSpec("127.0.0.1", front.port, tls=True))     # system trust store only
+            self.assertTrue(wait_for(lambda: any(k == "stopped" for k, p in events)))
+            self.assertEqual(ctl.state, radio.FAILED)
+            self.assertIn("not trusted", ctl.last_error)
+            self.assertEqual(kiwi.connections, 0)
+        finally:
+            ctl.shutdown()
+            front.stop()
+            kiwi.stop()
+
+    def test_tls_to_plain_server_stops(self):
+        srv = _one_shot_http_server(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+        events = []
+        ctl = RadioController(on_event=lambda k, p: events.append((k, p)))
+        try:
+            ctl.connect(ServerSpec("127.0.0.1", srv.getsockname()[1], tls=True))
+            self.assertTrue(wait_for(lambda: any(k == "stopped" for k, p in events)))
+            self.assertEqual(ctl.state, radio.FAILED)
+            self.assertIn("TLS handshake", ctl.last_error)
+        finally:
+            ctl.shutdown()
+            srv.close()
+
+    def test_redirect_to_https(self):
+        # A plain http front door that sends clients to the https one
+        kiwi = FakeKiwi()
+        front = TlsFront(kiwi.port)
+        srv = _one_shot_http_server(b"HTTP/1.1 301 Moved Permanently\r\nLocation: https://127.0.0.1:%d/\r\n\r\n"
+                                    % front.port)
+        ctl = RadioController(compression=False)
+        try:
+            with _trust_test_cert():
+                ctl.connect(ServerSpec("127.0.0.1", srv.getsockname()[1]))
+                self.assertTrue(wait_for(lambda: ctl.connected), "redirect to https not followed")
+        finally:
+            ctl.shutdown()
+            srv.close()
+            front.stop()
+            kiwi.stop()
 
 
 class TestEndToEnd(unittest.TestCase):

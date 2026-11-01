@@ -280,6 +280,18 @@ class TestApi(ApiCase):
         self.assertEqual(code, 202)                      # no wait: accepted, worker keeps trying
         code, r = self.call("POST", "/connect", {})
         self.assertEqual((code, r["error"]["code"]), (400, "bad_request"))
+        code, r = self.call("POST", "/connect", {"server": "127.0.0.1:1", "tls": "yes"})
+        self.assertEqual((code, r["error"]["code"]), (400, "bad_request"))
+
+    def test_connect_tls_flag(self):
+        port = free_port()
+        code, r = self.call("POST", "/connect", {"server": "127.0.0.1:%d" % port, "tls": True})
+        self.assertEqual(code, 202)
+        self.assertEqual((r["session"]["tls"], r["session"]["server"]), (True, "https://127.0.0.1:%d" % port))
+        code, r = self.call("POST", "/connect", {"server": "https://127.0.0.1:%d" % port})
+        self.assertTrue(r["session"]["tls"])
+        code, r = self.call("POST", "/connect", {"server": "127.0.0.1:%d" % port})
+        self.assertEqual((r["session"]["tls"], r["server"]), (False, "127.0.0.1:%d" % port))
 
     def test_validation(self):
         self.assertEqual(self.call("POST", "/tune", {"mode": "CW"})[0], 400)

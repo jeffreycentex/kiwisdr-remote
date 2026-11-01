@@ -208,3 +208,79 @@ class FakeKiwi:
 
     def mods(self):
         return [x for x in self.commands if x.startswith("SET mod=")]
+
+
+TLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tls")
+TLS_CERT = os.path.join(TLS_DIR, "cert.pem")   # self-signed for localhost/127.0.0.1, test use only
+TLS_KEY = os.path.join(TLS_DIR, "key.pem")
+
+
+class TlsFront:
+    """Terminates TLS and relays to a plain FakeKiwi, like an https reverse proxy
+    in front of a Kiwi. Each TLS socket is driven by one thread only: OpenSSL
+    doesn't allow concurrent reads and writes on one connection."""
+
+    def __init__(self, backend_port):
+        import ssl
+        self.backend_port = backend_port
+        self.handshake_errors = 0
+        self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+        self._srv = socket.socket()
+        self._srv.bind(("127.0.0.1", 0))
+        self._srv.listen()
+        self.port = self._srv.getsockname()[1]
+        self._stop = threading.Event()
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def stop(self):
+        self._stop.set()
+        self._srv.close()
+
+    def _accept(self):
+        while not self._stop.is_set():
+            try:
+                c, _ = self._srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._relay, args=(c,), daemon=True).start()
+
+    def _relay(self, raw):
+        import select
+        import ssl
+        try:
+            raw.settimeout(5)
+            tls = self._ctx.wrap_socket(raw, server_side=True)
+        except (OSError, ssl.SSLError):
+            self.handshake_errors += 1
+            raw.close()
+            return
+        back = socket.create_connection(("127.0.0.1", self.backend_port))
+        tls.setblocking(False)
+        try:
+            while not self._stop.is_set():
+                r, _, _ = select.select([tls, back], [], [], 0.2)
+                if tls in r or tls.pending():
+                    try:
+                        data = tls.recv(65536)
+                    except ssl.SSLWantReadError:
+                        data = None
+                    if data == b"":
+                        return
+                    if data:
+                        back.sendall(data)
+                if back in r:
+                    data = back.recv(65536)
+                    if not data:
+                        return
+                    tls.setblocking(True)
+                    tls.sendall(data)
+                    tls.setblocking(False)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            for s in (tls, back):
+                try:
+                    s.close()
+                except OSError:
+                    pass

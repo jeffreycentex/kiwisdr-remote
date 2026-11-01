@@ -38,7 +38,8 @@ def build_parser():
     g.add_argument("--record-dir", default=default_record_dir())
     g.add_argument("--no-compression", action="store_true", help="request uncompressed audio")
     g = ap.add_argument_group("startup connection (optional)")
-    g.add_argument("--connect", metavar="HOST[:PORT]")
+    g.add_argument("--connect", metavar="HOST[:PORT]", help="https://HOST[:PORT] connects over TLS")
+    g.add_argument("--tls", action="store_true", help="connect over TLS (Kiwis served over https)")
     g.add_argument("--password", default=os.environ.get("KIWIREMOTE_KIWI_PASSWORD", ""))
     g.add_argument("--user", default="kiwiremote")
     g.add_argument("--freq-khz", type=float)
@@ -95,7 +96,7 @@ def run(argv):
         if a.mode or a.freq_khz:
             svc.tune(a.freq_khz * 1000 if a.freq_khz else None, a.mode, source="startup")
         if a.connect:
-            svc.connect(a.connect, password=a.password, user=a.user)
+            svc.connect(a.connect, password=a.password, user=a.user, tls=a.tls)
         log.info("headless: API %s%s; Ctrl+C to quit", api.url,
                  "" if rig is None else ", rigctld %s:%d" % (rig.host, rig.port))
         while not done.wait(0.5):

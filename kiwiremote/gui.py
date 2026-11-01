@@ -101,6 +101,7 @@ class MainWindow(QMainWindow):
         self.server_combo.setInsertPolicy(QComboBox.NoInsert)
         self.server_combo.lineEdit().setPlaceholderText("host:port   e.g. mykiwi.example.net:8073")
         self.server_combo.lineEdit().returnPressed.connect(self._connect_clicked)
+        self.server_combo.textActivated.connect(self._server_picked)
         self.password = QLineEdit(echoMode=QLineEdit.Password, placeholderText="(optional)")
         self.user_name = QLineEdit(placeholderText="shown in the Kiwi user list")
         self.connect_btn = QPushButton("Connect")
@@ -109,6 +110,9 @@ class MainWindow(QMainWindow):
         find_btn.setToolTip(PUBLIC_LIST_URL)
         find_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(PUBLIC_LIST_URL)))
         self.compression = QCheckBox("Compressed audio (ADPCM, ~1/4 the bandwidth)")
+        self.tls = QCheckBox("TLS (https)")
+        self.tls.setToolTip("For Kiwis served over https. Without a port, 443 is used.\n"
+                            "An https:// address turns this on by itself.")
         self.conn_label = QLabel("Disconnected")
         self.session_label = QLabel("")
         self.session_label.setStyleSheet("color: gray")
@@ -124,7 +128,11 @@ class MainWindow(QMainWindow):
         g.addWidget(find_btn, 1, 3)
         g.addWidget(QLabel("Your name"), 2, 0)
         g.addWidget(self.user_name, 2, 1)
-        g.addWidget(self.compression, 3, 1, 1, 3)
+        opts = QHBoxLayout()
+        opts.addWidget(self.compression)
+        opts.addWidget(self.tls)
+        opts.addStretch(1)
+        g.addLayout(opts, 3, 1, 1, 3)
         g.addWidget(self.conn_label, 4, 0, 1, 3)
         g.addWidget(self.session_label, 5, 0, 1, 4)
         g.addWidget(self.smeter, 6, 0, 1, 4)
@@ -322,6 +330,7 @@ class MainWindow(QMainWindow):
         self.server_combo.setCurrentText(s.value("server", hist[0] if hist else ""))
         self.user_name.setText(s.value("user", "kiwiremote"))
         self.compression.setChecked(s.value("compression", True, type=bool))
+        self.tls.setChecked(s.value("tls", False, type=bool))
         mode = s.value("mode", "USB")
         mode = mode if mode in MODES else "USB"
         pb = s.value("passband", DEFAULT_PASSBAND[mode], type=int)
@@ -369,6 +378,7 @@ class MainWindow(QMainWindow):
         s.setValue("server", self.server_combo.currentText())
         s.setValue("user", self.user_name.text())
         s.setValue("compression", self.compression.isChecked())
+        s.setValue("tls", self.tls.isChecked())
         st = self.radio.tune
         s.setValue("freq_hz", st.freq_hz)
         s.setValue("mode", st.mode)
@@ -402,13 +412,18 @@ class MainWindow(QMainWindow):
             return
         text = self.server_combo.currentText()
         try:
-            spec = ServerSpec.parse(text, self.password.text(), self.user_name.text().strip())
+            spec = ServerSpec.parse(text, self.password.text(), self.user_name.text().strip(),
+                                    tls=self.tls.isChecked())
         except ValueError as e:
             QMessageBox.warning(self, "Server", "Invalid server address: %s" % e)
             return
         self._remember_server(spec.label())
         self.service.connect(spec, compression=self.compression.isChecked())
         self.connect_btn.setText("Disconnect")
+
+    def _server_picked(self, text):
+        # History entries carry https:// when they were TLS (ServerSpec.label)
+        self.tls.setChecked(text.strip().lower().startswith(("https://", "wss://")))
 
     def _remember_server(self, label):
         if self.server_combo.count() and self.server_combo.itemText(0) == label:
@@ -632,6 +647,7 @@ class MainWindow(QMainWindow):
         elif kind == "session":
             if payload and payload.get("ended") is None:
                 self._remember_server(payload["server"])
+                self.tls.setChecked(bool(payload.get("tls")))
                 self.connect_btn.setText("Disconnect")
             self._show_session(payload)
         elif kind == "state":
