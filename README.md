@@ -10,6 +10,10 @@ A cross-platform (Windows / macOS / Linux) desktop application for a remote Kiwi
 - **Remote-control API** (HTTP/JSON on localhost) for schedulers and scripts. Through it, a program can connect to a server with a password, tune, start and stop WAV recordings, and disconnect. A **headless mode** runs the API, rigctld and recording without a window. Both are described in [docs/API.md](docs/API.md).
 - **Session limits** that keep public Kiwi operators happy: a 15 s reconnect every 2 h, and a 45 min limit for sessions without a password. Kiwis on your own LAN are exempt.
 
+<p align="center">
+  <img src="docs/images/main-window.png" width="520" alt="KiwiSDR Remote main window on macOS: server, tuning, audio output, recording, rigctld and API panels">
+</p>
+
 It uses [jks-prv/kiwiclient](https://github.com/jks-prv/kiwiclient) for the KiwiSDR websocket protocol.
 
 Tested on:
